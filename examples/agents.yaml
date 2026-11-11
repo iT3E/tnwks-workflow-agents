@@ -32,6 +32,7 @@ agents:
               runAsNonRoot: true
               runAsUser: 10001
               runAsGroup: 10001
+              fsGroup: 10001                      # the client certificate is readable by the group only
               seccompProfile: {type: RuntimeDefault}
             containers:
               - name: run-job
@@ -64,6 +65,6 @@ agents:
               - name: tmp
                 emptyDir: {sizeLimit: 64Mi}
               - name: mtls
-                secret: {secretName: openshell-client-tls}  # the sandbox gateway of the trust domain
+                secret: {secretName: openshell-client-tls, defaultMode: 0440}  # the client certificate: ca.crt, tls.crt, tls.key
               - name: policy
                 configMap: {name: renovate-reviewer-policy}

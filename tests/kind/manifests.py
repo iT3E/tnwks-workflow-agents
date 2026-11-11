@@ -54,6 +54,7 @@ POD_SECURITY = {
     "runAsNonRoot": True,
     "runAsUser": 10001,
     "runAsGroup": 10001,
+    "fsGroup": 10001,  # the client certificate (mode 0440) is readable by the group only
     "seccompProfile": {"type": "RuntimeDefault"},
 }
 TMP = {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}}
