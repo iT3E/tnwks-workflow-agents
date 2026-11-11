@@ -31,7 +31,8 @@ class Names(unittest.TestCase):
         now = 1_794_000_000
         name = job.sandbox_name("renovate-review-7-3f1c2a9", now)
         self.assertRegex(name, job.NAME_PATTERN)
-        self.assertLessEqual(len(name), 63)
+        self.assertLessEqual(len(name), job.MAX_NAME_LENGTH)
+        self.assertLessEqual(len(job.sandbox_name("k", 36**7 - 1)), job.MAX_NAME_LENGTH)  # until 2050
         self.assertEqual(job.started_at(name), now)
         self.assertIsNone(job.started_at("my-own-sandbox"))
 
