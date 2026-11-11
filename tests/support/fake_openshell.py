@@ -2,9 +2,12 @@
 
 `sandbox create` starts the command of the sandbox as a local process, with
 only the --env variables of the call, and with the test credential of each
-provider, as the supervisor of a sandbox would add it. The forward is a no-op:
-the process listens on 127.0.0.1 in the same container. `sandbox delete` stops
-the process. Each call is a JSON line in $FAKE_OPENSHELL_STATE/calls.jsonl.
+provider, as the supervisor of a sandbox would add it. The process listens on
+127.0.0.1 in the same container, so the forward moves no data; but `forward
+start --background` leaves a child that holds the standard output and error
+of the CLI, as the ssh child of the real CLI does (seen on the kind cluster).
+`forward stop` stops that child. `sandbox delete` stops the process. Each call
+is a JSON line in $FAKE_OPENSHELL_STATE/calls.jsonl.
 
 FAKE_OPENSHELL_MODE holds words that change one step: create-fails,
 delete-fails, no-serve (the sandbox never answers /ping).
@@ -61,7 +64,18 @@ def main(argv: list[str]) -> int:
         proc = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
         (state / f"{name}.pid").write_text(str(proc.pid))
         return 0
-    if args[:1] == ["forward"]:
+    if args[:2] == ["forward", "start"]:
+        child = subprocess.Popen(["sleep", "600"], start_new_session=True)  # inherits stdout and stderr
+        (state / f"{args[3]}.fwd").write_text(str(child.pid))
+        return 0
+    if args[:2] == ["forward", "stop"]:
+        fwd = state / f"{args[3]}.fwd"
+        if fwd.exists():
+            try:
+                os.killpg(int(fwd.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            fwd.unlink()
         return 0
     if args[:2] == ["sandbox", "delete"]:
         name = args[2]

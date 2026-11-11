@@ -99,7 +99,7 @@ class RunJobLocal(unittest.TestCase):
         )
 
     def tearDown(self):
-        for pid_file in self.state.glob("*.pid"):  # a sandbox that a failed test left
+        for pid_file in [*self.state.glob("*.pid"), *self.state.glob("*.fwd")]:  # left by a failed test
             try:
                 os.killpg(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
