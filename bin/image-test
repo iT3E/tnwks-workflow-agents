@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# The image tests: what CI runs on the built image before any push
+# (build.yaml, image job, test-command) and what `task test` runs locally.
+#
+#   bin/image-test IMAGE
+#
+# 1. Smoke: the entrypoint, the user, the OpenShell CLI, and no file of state
+#    or credentials in the image.
+# 2. The tests in tests/, inside the image, with the code of the image. Each
+#    fake (model, GitHub, collector, Kubernetes API, OpenShell CLI) listens on
+#    127.0.0.1 in the same container: no real model, GitHub or cluster call.
+# 3. In CI only: a kind cluster with the sandbox layer at the pinned release,
+#    the providers, the run receiver and the fakes (tests/kind/up.sh). Then the
+#    whole run on it (tests/kind/test_on_kind.py). Never set IMAGE_TEST_KIND=1
+#    on a workstation that runs a live cluster.
+set -euo pipefail
+
+image="${1:?usage: image-test IMAGE}"
+cd "$(git rev-parse --show-toplevel)"
+
+echo "::group::Smoke test"
+docker run --rm "${image}" --help >/dev/null
+test "$(docker run --rm --entrypoint id "${image}" -u)" = "10001"
+test "$(docker run --rm --entrypoint id "${image}" -g)" = "10001"
+docker run --rm --entrypoint openshell "${image}" --version
+# `openshell forward start` runs the ssh client.
+docker run --rm --entrypoint ssh "${image}" -V
+# With no command the image serves AGENT_NAME; with no agent it must refuse (exit 2).
+rc=0; docker run --rm "${image}" >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::serve with no AGENT_NAME exited ${rc}, expected 2"; exit 1
+fi
+rc=0; docker run --rm "${image}" run-receiver >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::run-receiver with no config exited ${rc}, expected 2"; exit 1
+fi
+rc=0; docker run --rm "${image}" run-job >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::run-job with no config exited ${rc}, expected 2"; exit 1
+fi
+# Code only under /app; no state, key or env file anywhere we put files.
+found="$(docker run --rm --entrypoint sh "${image}" -c \
+  'find /app /tmp -type f \( -name "*.env" -o -name ".env*" -o -name "*.pem" -o -name "*.key" -o -name "*.crt" -o -name "*.sqlite*" -o -name "*.db" \) 2>/dev/null')"
+if [ -n "${found}" ]; then
+  echo "::error::state or credential files in the image: ${found}"; exit 1
+fi
+echo "::endgroup::"
+
+echo "::group::Tests"
+docker run --rm --init --read-only --tmpfs /tmp:rw,exec,size=256m \
+  -v "${PWD}/tests:/tests:ro" -v "${PWD}/examples:/examples:ro" -w /tests \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  --entrypoint python3 "${image}" -m unittest discover -s /tests -t /tests -v
+echo "::endgroup::"
+
+if [[ "${CI:-}" != "true" && "${IMAGE_TEST_KIND:-}" != "1" ]]; then
+  echo "== the whole run on a kind cluster runs in CI only: skipped"
+  exit 0
+fi
+
+repo="${PWD}"
+work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/image-test.XXXXXX")"
+finish() {
+  local status=$?
+  if ((status != 0)); then
+    echo "::group::The state of the test cluster"
+    "${repo}/tests/kind/dump.sh" "${work}" || true
+    echo "::endgroup::"
+  fi
+  "${repo}/tests/kind/down.sh" "${work}" || true
+  rm -rf "${work}"
+  exit "${status}"
+}
+trap finish EXIT
+
+echo "::group::The test cluster"
+"${repo}/tests/kind/up.sh" "${image}" "${work}"
+echo "::endgroup::"
+
+echo "== the whole run on the kind cluster"
+export IMAGE_REF="${image}" PYTHONDONTWRITEBYTECODE=1
+export IMAGE_TEST_KUBECONFIG="${work}/kubeconfig" IMAGE_TEST_KUBECTL="${work}/bin/kubectl"
+(cd "${repo}/tests/kind" && python3 -m unittest -v test_on_kind)

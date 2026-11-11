@@ -1,0 +1,33 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  // The app-repo presets from iT3E/github-workflows (renovate/), at the
+  // release app-repo-template pins (the one the workflow callers use); a
+  // template update moves the pin. Repo-only rules go below the extends;
+  // copier update keeps them.
+  extends: [
+    "github>iT3E/github-workflows//renovate/default.json5#v1.8.1",
+    "github>iT3E/github-workflows//renovate/python.json5#v1.8.1",
+  ],
+  // The OpenShell CLI of the run job, in the Dockerfile. Its release must
+  // match the sandbox gateway chart in tnwks-ops, and a new release needs
+  // its two checksums by hand (the build fails until they match), so it is
+  // never merged by Renovate.
+  customManagers: [
+    {
+      customType: "regex",
+      description: "The OpenShell CLI release in the Dockerfile",
+      managerFilePatterns: ["/^Dockerfile$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG OPENSHELL_VERSION=(?<currentValue>\\S+)",
+      ],
+    },
+  ],
+  packageRules: [
+    {
+      description: "The OpenShell CLI and the OpenShell release of the test cluster: one reviewed update, with the checksums of the CLI and the chart release in tnwks-ops",
+      matchDepNames: ["NVIDIA/OpenShell", "ghcr.io/nvidia/openshell/sandbox"],
+      groupName: "OpenShell",
+      automerge: false,
+    },
+  ],
+}

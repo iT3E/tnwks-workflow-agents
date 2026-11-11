@@ -1,0 +1,11 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.9.2
+_src_path: https://github.com/iT3E/app-repo-template.git
+extra_test_command: ''
+has_image: true
+image_name: ''
+image_push_main: false
+image_test_command: bin/image-test "$IMAGE_REF"
+image_test_postgres: false
+language: python
+python_version: '3.13'

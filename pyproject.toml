@@ -1,0 +1,6 @@
+# Tool settings only. The packages of the image are in requirements.txt (one
+# release each) and constraints.txt (the full frozen set), which Renovate updates.
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+src = ["src", "tests"]

@@ -1,0 +1,57 @@
+---
+version: "3"
+
+# Managed by Copier from https://github.com/iT3E/app-repo-template. Same task
+# names as tnwks-ops where they overlap (precommit:*, privacy:*).
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  precommit:init:
+    desc: Install the git hooks (pre-commit and commit-msg) in this clone
+    cmds:
+      - bin/install-hooks
+
+  precommit:run:
+    desc: Run every hook on every file
+    cmds:
+      - pre-commit run --all-files
+
+  privacy:check:
+    desc: Check tracked files and paths against the privacy denylist
+    cmds:
+      - bin/privacy-check {{.CLI_ARGS}}
+
+  privacy:sync:
+    desc: Copy the denylist from a tnwks-ops checkout into this repo's PRIVACY_TERMS Actions secret
+    vars:
+      OPS: '{{.TNWKS_OPS_DIR | default "../tnwks-ops"}}'
+    cmds:
+      # gh picks this repo from the git remote.
+      - (cd "{{.OPS}}" && sops -d --extract '["terms"]' .github/privacy-terms.sops.yaml) | gh secret set PRIVACY_TERMS
+
+  changelog:new:
+    desc: Add a Changie fragment for this PR (needs changie, brew install changie)
+    cmds:
+      - changie new
+
+  template:update:
+    desc: Update the Copier-managed files to the latest app-repo-template release (task template:update -- --vcs-ref vX.Y.Z for another)
+    cmds:
+      - copier update --skip-answered --defaults {{.CLI_ARGS}}
+
+  test:
+    desc: The checks CI runs (compileall, the image tests)
+    cmds:
+      - python3 -m compileall -q -x '/(\.git|\.venv|node_modules)/' .
+      - docker build -t app-test:dev .
+      - |
+        export IMAGE_REF=app-test:dev
+        bin/image-test "$IMAGE_REF"
+
+  format:
+    desc: ruff format the given files (task format -- FILES)
+    cmds:
+      - pre-commit run ruff-format --files {{.CLI_ARGS}}

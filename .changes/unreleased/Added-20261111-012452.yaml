@@ -1,0 +1,3 @@
+kind: Added
+body: 'The run job: it starts the workflow agent in a sandbox of the trust domain with its providers and policy, waits for GET /ping through the port forward, sends the input in the body of POST /invocations, prints the answer, and deletes the sandbox, also on an error and on SIGTERM. The sweep deletes each run sandbox past its time limit. The image holds the OpenShell CLI 0.1.7'
+time: 2026-11-11T01:24:52.375318083-08:00
