@@ -1,0 +1,32 @@
+# The provider profile of the model gateway for the workflow agents (OpenShell
+# 0.1.7). The gateway imports it once (`openshell profile import -f`); then
+# `openshell provider create --name model-gateway --type workflow-model-gateway
+# --credential MODEL_GATEWAY_KEY` makes the provider that the Job template
+# names in SANDBOX_PROVIDERS. In a sandbox, MODEL_GATEWAY_KEY holds a
+# placeholder. The proxy of the sandbox puts the key in the Authorization
+# header of a request to this endpoint and to no other. The tests of the kind
+# cluster import this file as it is.
+id: workflow-model-gateway
+display_name: Model gateway of the workflow agents
+description: The OpenAI-compatible API of the model gateway, for chat completions only
+category: inference
+credentials:
+  - name: api_key
+    description: The key of the model gateway for the workflow trust domain
+    env_vars: [MODEL_GATEWAY_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: litellm-app.ai.svc.cluster.local
+    port: 4000
+    protocol: rest
+    tls: ""
+    enforcement: enforce
+    rules:
+      - allow: { method: POST, path: "/v1/chat/completions" }
+binaries:
+  - /usr/local/bin/python3.13
+  - /usr/local/bin/python3

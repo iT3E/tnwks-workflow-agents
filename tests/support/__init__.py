@@ -76,8 +76,8 @@ class JsonHandler(BaseHTTPRequestHandler):
 class Server:
     """An HTTP server in a thread, on a free port of 127.0.0.1."""
 
-    def __init__(self, app, port: int | None = None):
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port or 0), JsonHandler)
+    def __init__(self, app, port: int | None = None, host: str = "127.0.0.1"):
+        self.httpd = ThreadingHTTPServer((host, port or 0), JsonHandler)
         self.httpd.daemon_threads = True
         self.httpd.app = app
         self.httpd.requests = []

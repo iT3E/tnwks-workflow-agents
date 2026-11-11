@@ -8,6 +8,13 @@
 # Base image pinned by tag and digest (Debian 13 "trixie", Python 3.13).
 ARG PYTHON_IMAGE=python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
+# The OpenShell release of the sandbox layer, at its tag and digest, as in the
+# agent image. Nothing copies from this stage, so a build skips it. The test
+# cluster of CI (tests/kind/up.sh) installs the chart of this release with this
+# sandbox runtime, and checks that OPENSHELL_VERSION below is the same release.
+# Renovate moves the tag and the digest; the CLI and its checksums follow by hand.
+FROM ghcr.io/nvidia/openshell/sandbox:0.1.7@sha256:89819c03f291d9b909c3fc2962360e24af4516627422d18f3e681829f003f347 AS openshell-release
+
 # ---- the OpenShell CLI, for the run job and the sweep ----
 FROM ${PYTHON_IMAGE} AS openshell
 ARG TARGETARCH

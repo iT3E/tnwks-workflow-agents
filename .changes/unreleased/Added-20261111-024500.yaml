@@ -1,0 +1,3 @@
+kind: Added
+body: 'The provider profiles of the Renovate reviewer (examples/providers/), the service names of the platform in the examples, and the whole run on a kind cluster in CI: the run receiver, a Job from the template, a real sandbox with its providers, the delete on SIGTERM and the sweep'
+time: 2026-11-11T02:45:00.000000000-08:00

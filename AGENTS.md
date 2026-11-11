@@ -35,8 +35,10 @@ Rules that hold for each change:
   `src/agents/__init__.py`, and one case in `tests/support/cases.py`
   (`test_contract.py` fails without it). Its Job template and provider go
   to tnwks-ops.
-- **No real model or GitHub call in a test**, and no cluster but a kind
-  cluster that a CI job makes (`KIND_E2E=1`). Never point a test at the
+- **No real model or GitHub call in a test**, and no cluster but the kind
+  cluster that `bin/image-test` makes in CI (`tests/kind/up.sh`, only with
+  `CI=true` or `IMAGE_TEST_KIND=1`). Never set `IMAGE_TEST_KIND=1` on a
+  workstation that runs a live cluster, and never point a test at the
   default `kubectl` context.
 
 ## Change workflow

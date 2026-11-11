@@ -9,7 +9,10 @@
 # 2. The tests in tests/, inside the image, with the code of the image. Each
 #    fake (model, GitHub, collector, Kubernetes API, OpenShell CLI) listens on
 #    127.0.0.1 in the same container: no real model, GitHub or cluster call.
-#    The test of the whole run on a kind cluster skips here (KIND_E2E unset).
+# 3. In CI only: a kind cluster with the sandbox layer at the pinned release,
+#    the providers, the run receiver and the fakes (tests/kind/up.sh). Then the
+#    whole run on it (tests/kind/test_on_kind.py). Never set IMAGE_TEST_KIND=1
+#    on a workstation that runs a live cluster.
 set -euo pipefail
 
 image="${1:?usage: image-test IMAGE}"
@@ -49,3 +52,32 @@ docker run --rm --init --read-only --tmpfs /tmp:rw,exec,size=256m \
   -e PYTHONDONTWRITEBYTECODE=1 \
   --entrypoint python3 "${image}" -m unittest discover -s /tests -t /tests -v
 echo "::endgroup::"
+
+if [[ "${CI:-}" != "true" && "${IMAGE_TEST_KIND:-}" != "1" ]]; then
+  echo "== the whole run on a kind cluster runs in CI only: skipped"
+  exit 0
+fi
+
+repo="${PWD}"
+work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/image-test.XXXXXX")"
+finish() {
+  local status=$?
+  if ((status != 0)); then
+    echo "::group::The state of the test cluster"
+    "${repo}/tests/kind/dump.sh" "${work}" || true
+    echo "::endgroup::"
+  fi
+  "${repo}/tests/kind/down.sh" "${work}" || true
+  rm -rf "${work}"
+  exit "${status}"
+}
+trap finish EXIT
+
+echo "::group::The test cluster"
+"${repo}/tests/kind/up.sh" "${image}" "${work}"
+echo "::endgroup::"
+
+echo "== the whole run on the kind cluster"
+export IMAGE_REF="${image}" PYTHONDONTWRITEBYTECODE=1
+export IMAGE_TEST_KUBECONFIG="${work}/kubeconfig" IMAGE_TEST_KUBECTL="${work}/bin/kubectl"
+(cd "${repo}/tests/kind" && python3 -m unittest -v test_on_kind)

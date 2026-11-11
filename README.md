@@ -80,6 +80,7 @@ The state of the run of that key, with the same bodies and codes as `POST`
 | User | UID 10001, GID 10001, `HOME=/tmp`. Code in `/app/src`, read-only |
 | Entrypoint | `python3 /app/src/entrypoint.py`, default command `serve` |
 | Root file system | Read-only works. The run job and the sweep need `/tmp` writable (an `emptyDir`): the CLI config goes there |
+| Tools | The OpenShell CLI (`/usr/local/bin/openshell`, the release of the sandbox gateway) and the `ssh` client, which the CLI runs for the port forward of the run job |
 | Port | 8080 for `serve` and `run-receiver` |
 
 | Command (`args`) | Part | Kubernetes rights of its service account |
@@ -167,10 +168,17 @@ pod), the annotations `workflow-agents/run-key` and
 
 ### The providers of the Renovate reviewer
 
-| Provider | Variable in the sandbox | Address and paths |
+Each provider comes from a provider profile in
+[`examples/providers/`](examples/providers/): the gateway imports the profile
+(`openshell profile import -f`), and `openshell provider create --type <id>`
+makes the provider with the credential. The profile names the address, the
+paths and the binaries where the proxy of the sandbox puts the credential in.
+The sandbox holds only a placeholder.
+
+| Provider (profile) | Variable in the sandbox | Address and paths |
 | --- | --- | --- |
-| The model gateway | `MODEL_GATEWAY_KEY`, as `Authorization: Bearer` | `POST /v1/chat/completions` at the model gateway |
-| GitHub | `GITHUB_TOKEN`, as `Authorization: Bearer` | `api.github.com`: `GET` on `/repos/{repo}/pulls/{n}`, `/pulls/{n}/files`, `/contents/**`, `/issues/{n}/comments`, `/commits/{sha}/check-runs`, and `POST /repos/{repo}/issues/{n}/comments` |
+| `model-gateway` (`workflow-model-gateway`) | `MODEL_GATEWAY_KEY`, as `Authorization: Bearer` | `POST /v1/chat/completions` at `litellm-app.ai.svc.cluster.local:4000` |
+| `github-reviewer` (`workflow-github-reviewer`) | `GITHUB_TOKEN`, as `Authorization: Bearer` | `api.github.com`: `GET` on `/repos/{repo}/pulls/*`, `/pulls/*/files`, `/contents/**`, `/issues/*/comments`, `/commits/*/check-runs`, and `POST /repos/{repo}/issues/*/comments`, for one repository |
 
 The GitHub credential needs read access to pull requests, contents and
 checks, and write access to issue comments, on the reviewed repository only.
@@ -200,7 +208,37 @@ trace collector, the Kubernetes API and the OpenShell CLI are fakes in
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
 | `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes |
-| `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep. The whole run on a kind cluster runs in CI only, with `KIND_E2E=1` and the kind setup |
+| `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep |
+| `kind/test_on_kind.py` | CI only, on the host of the job: the whole run on a kind cluster (below) |
+
+### The test cluster
+
+In CI, `bin/image-test` then makes a kind cluster with one node
+([`tests/kind/up.sh`](tests/kind/up.sh)) and runs
+[`tests/kind/test_on_kind.py`](tests/kind/test_on_kind.py) on it. The
+cluster has Agent Sandbox and the OpenShell chart of the release of the
+`openshell-release` stage of the Dockerfile, in the namespace
+`agents-workflows` (the sandbox gateway of the trust domain); the providers
+of `examples/providers/`; the run receiver with its Role and the list of
+`examples/agents.yaml`; and fakes in the image under test: the model gateway
+at `litellm-app.ai`, the trace collector at `alloy.monitoring`, and GitHub in
+`test-support`. The tests:
+
+1. A run through `POST /runs` answers `200` with the review, the model and
+   GitHub got the test credentials from the providers (the sandbox has only a
+   placeholder), the spans got to the collector, and no sandbox is left. The
+   same key gets the same run.
+2. A second key for the same head is skipped: one comment for one head.
+3. A run job that gets SIGTERM in the middle of a run deletes its sandbox,
+   and the sweep (`--dry-run`) finds the sandbox by its label first.
+
+Each kubectl and helm call names the kubeconfig file of the test cluster.
+When a step fails, [`tests/kind/dump.sh`](tests/kind/dump.sh) prints the
+pods, the events and the logs to the job log. The pins of the cluster are in
+[`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile)
+(Renovate) and in `up.sh` (kind, helm, kubectl, by hand), the same as in the
+agent image repository. Never run it on a workstation that runs a live
+cluster: `up.sh` refuses unless `CI=true` or `IMAGE_TEST_KIND=1`.
 
 ## Workflow
 
@@ -219,5 +257,6 @@ CI from [iT3E/github-workflows](https://github.com/iT3E/github-workflows);
 - Renovate keeps dependencies current. Patch, digest and non-0.x minor
   updates merge themselves once CI is green; majors wait for review on the
   Renovate Dashboard issue. Template releases arrive as their own
-  `renovate/template` PRs. The OpenShell CLI never merges by itself: its
-  checksums change by hand, with the chart release in tnwks-ops.
+  `renovate/template` PRs. OpenShell (the `openshell-release` stage and the
+  CLI) is one group that never merges by itself: the checksums of the CLI
+  change by hand, with the chart release in tnwks-ops.

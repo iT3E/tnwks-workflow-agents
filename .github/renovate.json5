@@ -24,8 +24,9 @@
   ],
   packageRules: [
     {
-      description: "The OpenShell CLI: reviewed, with its checksums and the chart release in tnwks-ops",
-      matchDepNames: ["NVIDIA/OpenShell"],
+      description: "The OpenShell CLI and the OpenShell release of the test cluster: one reviewed update, with the checksums of the CLI and the chart release in tnwks-ops",
+      matchDepNames: ["NVIDIA/OpenShell", "ghcr.io/nvidia/openshell/sandbox"],
+      groupName: "OpenShell",
       automerge: false,
     },
   ],

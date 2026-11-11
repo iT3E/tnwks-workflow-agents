@@ -1,8 +1,8 @@
 # The list of agents of the run receiver, with the Job template of each one.
 # The ops repository holds the real file as a ConfigMap, mounted at
 # /etc/run-receiver/agents.yaml. The tests load this file, so it stays a
-# template that the receiver accepts. Names marked "from WS1" are the names of
-# a trust domain that the foundations give; the values here are examples.
+# template that the receiver accepts. The service names are those of the
+# foundations of the platform; the image, the model and the repository are examples.
 #
 # The receiver sets metadata.name (from the key), the namespace (its own), the
 # label workflow-agents/agent, two annotations, and the variables RUN_KEY and
@@ -43,12 +43,12 @@ agents:
                   - {name: SANDBOX_POLICY, value: /etc/workflow-run/policy.yaml}
                   - {name: SANDBOX_PROVIDERS, value: "model-gateway,github-reviewer"}
                   - {name: SANDBOX_MEMORY, value: 512Mi}
-                  - {name: OPENSHELL_GATEWAY_URL, value: "https://openshell.agents-workflows.svc.cluster.local:8080"}  # from WS1
+                  - {name: OPENSHELL_GATEWAY_URL, value: "https://openshell.agents-workflows.svc.cluster.local:8080"}  # the sandbox gateway of the trust domain
                   - {name: RUN_TIMEOUT_SECONDS, value: "1800"}
-                  - {name: AGENT_ENV_MODEL_GATEWAY_URL, value: "http://model-gateway.example.svc.cluster.local:4000/v1"}
+                  - {name: AGENT_ENV_MODEL_GATEWAY_URL, value: "http://litellm-app.ai.svc.cluster.local:4000/v1"}
                   - {name: AGENT_ENV_MODEL_ID, value: review-model}
                   - {name: AGENT_ENV_REVIEWER_REPOSITORIES, value: "example-org/example-gitops"}
-                  - {name: AGENT_ENV_OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://trace-collector.example.svc.cluster.local:4318"}
+                  - {name: AGENT_ENV_OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://alloy.monitoring.svc.cluster.local:4318"}
                 securityContext:
                   allowPrivilegeEscalation: false
                   readOnlyRootFilesystem: true
@@ -64,6 +64,6 @@ agents:
               - name: tmp
                 emptyDir: {sizeLimit: 64Mi}
               - name: mtls
-                secret: {secretName: openshell-client-tls}  # from WS1
+                secret: {secretName: openshell-client-tls}  # the sandbox gateway of the trust domain
               - name: policy
                 configMap: {name: renovate-reviewer-policy}

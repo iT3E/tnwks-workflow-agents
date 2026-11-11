@@ -1,0 +1,38 @@
+# The provider profile of GitHub for the Renovate reviewer (OpenShell 0.1.7):
+# the calls of src/agents/renovate_reviewer/github.py and no other, on one
+# repository. The gateway imports it once; then `openshell provider create
+# --name github-reviewer --type workflow-github-reviewer --credential
+# GITHUB_TOKEN` makes the provider. The credential needs read access to pull
+# requests, contents and checks, and write access to issue comments, on that
+# repository only: no right to merge, push, approve or change a label.
+#
+# The tests of the kind cluster import this file with the address of the fake
+# GitHub (plain HTTP in the test namespace) in place of api.github.com.
+id: workflow-github-reviewer
+display_name: GitHub for the Renovate reviewer
+description: Read one pull request and post one comment, on one repository
+category: source_control
+credentials:
+  - name: api_token
+    description: The GitHub credential of the reviewer
+    env_vars: [GITHUB_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_token]
+endpoints:
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/repos/example-org/example-gitops/pulls/*" }
+      - allow: { method: GET, path: "/repos/example-org/example-gitops/pulls/*/files" }
+      - allow: { method: GET, path: "/repos/example-org/example-gitops/contents/**" }
+      - allow: { method: GET, path: "/repos/example-org/example-gitops/issues/*/comments" }
+      - allow: { method: GET, path: "/repos/example-org/example-gitops/commits/*/check-runs" }
+      - allow: { method: POST, path: "/repos/example-org/example-gitops/issues/*/comments" }
+binaries:
+  - /usr/local/bin/python3.13
+  - /usr/local/bin/python3

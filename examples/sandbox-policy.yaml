@@ -1,9 +1,10 @@
 # The sandbox policy of a workflow agent: the default file rules of OpenShell,
 # plus /app as a read-only path (the code of the agent), plus one network rule
-# for the trace collector. The model gateway and GitHub come from the providers
-# of the agent, which name their own addresses and paths. The ops repository
-# holds the real file as a ConfigMap; this is the policy of the test rig
-# (RUN-014) with the example address of the collector.
+# for the trace collector (OTLP over HTTP). The model gateway and GitHub come
+# from the providers of the agent: their profiles (examples/providers/) name
+# their own addresses and paths. The ops repository holds the real file as a
+# ConfigMap; this is the policy of the test rig (RUN-014) with the address of
+# the trace collector of the platform.
 version: 1
 filesystem_policy:
   include_workdir: true
@@ -15,7 +16,7 @@ network_policies:
   otel:
     name: otel
     endpoints:
-      - host: trace-collector.example.svc.cluster.local
+      - host: alloy.monitoring.svc.cluster.local
         port: 4318
         protocol: rest
         tls: ""
