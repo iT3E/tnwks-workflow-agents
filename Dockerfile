@@ -45,6 +45,12 @@ LABEL org.opencontainers.image.title="tnwks-workflow-agents" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
+# The OpenShell CLI starts the `ssh` client for `forward start`, the port
+# forward of the run job to the contract port of the sandbox.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=constraints.txt,target=/tmp/constraints.txt \
     pip install --no-cache-dir --root-user-action=ignore --disable-pip-version-check \
