@@ -135,7 +135,7 @@ line on standard output; the receiver reads it from the pod log. Exit codes:
 not complete, 3 the sandbox did not start or answer, 4 no answer in time, 5
 the pod was stopped, 6 the sandbox was not deleted. Each sandbox gets the
 labels `workflow-run=true` and `workflow-agent=<name>`, and the name
-`run-<12 hex of the key>-<start time in base 36>`.
+`run-<7 hex of the key>-<start time in base 36>` (OpenShell takes at most 19 characters).
 
 ### Environment of `run-receiver`
 
