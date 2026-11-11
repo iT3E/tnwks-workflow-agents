@@ -193,6 +193,9 @@ class RunJobOnKind(unittest.TestCase):
         job = body["job"]
 
         def waiting():
+            code, state = http("GET", f"{RECEIVER_URL}/runs/{key}", self.token)
+            if code != 202:
+                raise AssertionError(f"the run ended before its model call: {code} {state}\n{job_log(job)}")
             return [r for r in seen("ai", "litellm-app", 4000) if r["slow"]]
 
         wait_for("the model call of the run", waiting, 600, every=5)
