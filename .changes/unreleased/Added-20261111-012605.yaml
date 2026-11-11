@@ -1,0 +1,3 @@
+kind: Added
+body: 'The run receiver: POST /runs with a token, an agent name from the list in git, an input and the key of the run. It makes one Job from the template of that agent, changes nothing else of it, and gives back the answer. A second call with the same key gets the same run. GET /runs/{key} gives the state of a run'
+time: 2026-11-11T01:26:05.696444298-08:00

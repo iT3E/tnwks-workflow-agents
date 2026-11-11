@@ -7,8 +7,9 @@
 # 1. Smoke: the entrypoint, the user, the OpenShell CLI, and no file of state
 #    or credentials in the image.
 # 2. The tests in tests/, inside the image, with the code of the image. Each
-#    fake (model, GitHub, collector, OpenShell CLI) listens on
-#    127.0.0.1 in the same container: no real model, GitHub or sandbox call.
+#    fake (model, GitHub, collector, Kubernetes API, OpenShell CLI) listens on
+#    127.0.0.1 in the same container: no real model, GitHub or cluster call.
+#    The test of the whole run on a kind cluster skips here (KIND_E2E unset).
 set -euo pipefail
 
 image="${1:?usage: image-test IMAGE}"
@@ -23,6 +24,10 @@ docker run --rm --entrypoint openshell "${image}" --version
 rc=0; docker run --rm "${image}" >/dev/null 2>&1 || rc=$?
 if [ "${rc}" -ne 2 ]; then
   echo "::error::serve with no AGENT_NAME exited ${rc}, expected 2"; exit 1
+fi
+rc=0; docker run --rm "${image}" run-receiver >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::run-receiver with no config exited ${rc}, expected 2"; exit 1
 fi
 rc=0; docker run --rm "${image}" run-job >/dev/null 2>&1 || rc=$?
 if [ "${rc}" -ne 2 ]; then

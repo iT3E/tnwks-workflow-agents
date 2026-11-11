@@ -1,0 +1,69 @@
+# The list of agents of the run receiver, with the Job template of each one.
+# The ops repository holds the real file as a ConfigMap, mounted at
+# /etc/run-receiver/agents.yaml. The tests load this file, so it stays a
+# template that the receiver accepts. Names marked "from WS1" are the names of
+# a trust domain that the foundations give; the values here are examples.
+#
+# The receiver sets metadata.name (from the key), the namespace (its own), the
+# label workflow-agents/agent, two annotations, and the variables RUN_KEY and
+# RUN_INPUT of the run-job container. Nothing else of the Job comes from a caller.
+agents:
+  renovate-reviewer:
+    job:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        labels:
+          app.kubernetes.io/name: workflow-run
+      spec:
+        backoffLimit: 0                  # one run for one key: no second pod
+        activeDeadlineSeconds: 2400      # the time limit of a run, with the sandbox start and delete
+        ttlSecondsAfterFinished: 604800  # the Job, and so the key, stays 7 days
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/name: workflow-run
+          spec:
+            restartPolicy: Never
+            serviceAccountName: workflow-run
+            automountServiceAccountToken: false  # the run job calls no Kubernetes API
+            terminationGracePeriodSeconds: 90     # time to delete the sandbox after SIGTERM
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 10001
+              runAsGroup: 10001
+              seccompProfile: {type: RuntimeDefault}
+            containers:
+              - name: run-job
+                image: ghcr.io/it3e/tnwks-workflow-agents:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+                args: ["run-job"]
+                env:
+                  - {name: AGENT_NAME, value: renovate-reviewer}
+                  - {name: SANDBOX_IMAGE, value: "ghcr.io/it3e/tnwks-workflow-agents:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+                  - {name: SANDBOX_POLICY, value: /etc/workflow-run/policy.yaml}
+                  - {name: SANDBOX_PROVIDERS, value: "model-gateway,github-reviewer"}
+                  - {name: SANDBOX_MEMORY, value: 512Mi}
+                  - {name: OPENSHELL_GATEWAY_URL, value: "https://openshell.agents-workflows.svc.cluster.local:8080"}  # from WS1
+                  - {name: RUN_TIMEOUT_SECONDS, value: "1800"}
+                  - {name: AGENT_ENV_MODEL_GATEWAY_URL, value: "http://model-gateway.example.svc.cluster.local:4000/v1"}
+                  - {name: AGENT_ENV_MODEL_ID, value: review-model}
+                  - {name: AGENT_ENV_REVIEWER_REPOSITORIES, value: "example-org/example-gitops"}
+                  - {name: AGENT_ENV_OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://trace-collector.example.svc.cluster.local:4318"}
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: {drop: [ALL]}
+                resources:
+                  requests: {cpu: 50m, memory: 64Mi}
+                  limits: {memory: 256Mi}
+                volumeMounts:
+                  - {name: tmp, mountPath: /tmp}
+                  - {name: mtls, mountPath: /etc/openshell/mtls, readOnly: true}
+                  - {name: policy, mountPath: /etc/workflow-run, readOnly: true}
+            volumes:
+              - name: tmp
+                emptyDir: {sizeLimit: 64Mi}
+              - name: mtls
+                secret: {secretName: openshell-client-tls}  # from WS1
+              - name: policy
+                configMap: {name: renovate-reviewer-policy}

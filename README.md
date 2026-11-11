@@ -20,6 +20,57 @@ trigger --POST /runs, token--> run receiver --Job from the template--> run job
 | The workflow agents | `src/agents/<name>/` | One package each: its loop, its prompt, its tools. Today: `renovate-reviewer` |
 | The run job | `src/run_job/job.py` | Starts a sandbox, sends the input, prints the answer, deletes the sandbox |
 | The sweep | `src/run_job/sweep.py` | Deletes each run sandbox that is older than its time limit |
+| The run receiver | `src/run_receiver/` | The API below. It checks the token and the agent name, and makes one Job for one key |
+
+## The run receiver API
+
+Each call but `/healthz` needs the header `Authorization: Bearer <token>`.
+The token is `RUN_RECEIVER_TOKEN`, from a Secret. A call with no token or a
+wrong one gets `401`.
+
+### `POST /runs`
+
+```json
+{"agent": "renovate-reviewer", "input": {"repo": "owner/name", "pr": 7, "head_sha": "<40 hex>"}, "key": "renovate-review-7-<sha>", "wait": true}
+```
+
+| Field | Rule |
+| --- | --- |
+| `agent` | A name in the list of agents (the config file). Another name gets `404` |
+| `input` | A JSON object: the `input` of the contract of that agent. At most `RUN_RECEIVER_MAX_INPUT_BYTES` (256 KiB) as compact JSON, or `413` |
+| `key` | The key of the run: 1 to 200 characters, letters, digits, `.`, `_`, `-`, and a letter or digit first. It names the Job (`run-<20 hex of sha256(key)>`) |
+| `wait` | Optional, default `true`: answer when the run ends. `false`: answer at once |
+
+Any other field gets `400`. The caller sets nothing of the Job but these.
+
+| Status | Body | When |
+| --- | --- | --- |
+| `200` | `{"key", "agent", "job", "created", "status": "succeeded", "output": {...}}` | The run ended, and the agent answered. `output` is the `output` of the contract |
+| `202` | `{"key", "agent", "job", "created", "status": "running"}` | `wait` is `false`, or the run did not end in its time limit plus 60 s |
+| `400` | `{"error"}` | The body is not valid |
+| `401` | `{"error"}` | No token, or a wrong one |
+| `404` | `{"error"}` | The agent is not in the list |
+| `409` | `{"error", "key"}` | The key belongs to a run with a different agent or input |
+| `413` | `{"error"}` | The input is too large |
+| `502` | `{"key", "agent", "job", "created", "status": "failed", "error"}` | The run failed: the agent answered with an error, or the sandbox did not start |
+| `503` | `{"error"}` | The cluster API did not answer |
+| `504` | `{"key", "agent", "job", "created", "status": "timed_out", "error"}` | The Job reached its time limit (`activeDeadlineSeconds`) |
+
+**One run for one key.** A second call with the same key, the same agent and
+the same input makes no second Job. It gets `"created": false` and the same
+run: `202` while it runs, and the same answer when it ended. With a different
+agent or input it gets `409`. The Job, and so the key, stays until
+`ttlSecondsAfterFinished` of the template (7 days in the example); after that
+the same key makes a new run.
+
+### `GET /runs/{key}`
+
+The state of the run of that key, with the same bodies and codes as `POST`
+(no `created`). `404` when no Job has that key.
+
+### `GET /healthz`
+
+`200 {"status": "ok"}`, with no token. For the probes.
 
 ## The image contract
 
@@ -29,11 +80,12 @@ trigger --POST /runs, token--> run receiver --Job from the template--> run job
 | User | UID 10001, GID 10001, `HOME=/tmp`. Code in `/app/src`, read-only |
 | Entrypoint | `python3 /app/src/entrypoint.py`, default command `serve` |
 | Root file system | Read-only works. The run job and the sweep need `/tmp` writable (an `emptyDir`): the CLI config goes there |
-| Port | 8080 for `serve` |
+| Port | 8080 for `serve` and `run-receiver` |
 
 | Command (`args`) | Part | Kubernetes rights of its service account |
 | --- | --- | --- |
 | `serve` (or none) | A workflow agent, for the agent of `AGENT_NAME` | None. In a sandbox it has no service account token |
+| `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`; `pods`: `list`; `pods/log`: `get` |
 | `run-job` | The run job, a Job from the template | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate only |
 | `sweep [--dry-run]` | The time limit of the sandboxes, a CronJob | None, as the run job |
 
@@ -61,7 +113,7 @@ The `renovate-reviewer` agent adds:
 ### Environment of `run-job`
 
 The Job template of each agent sets these. The run receiver adds `RUN_KEY`
-and `RUN_INPUT`.
+and `RUN_INPUT` only.
 
 | Variable | What it holds |
 | --- | --- |
@@ -78,18 +130,40 @@ and `RUN_INPUT`.
 | `READY_TIMEOUT_SECONDS`, `RUN_TIMEOUT_SECONDS` | The wait for `/ping` (180) and for the answer (1800) |
 
 The run job prints one result line, `workflow-run-result: {...}`, as its last
-line on standard output; the run receiver reads it from the pod log. Exit codes:
+line on standard output; the receiver reads it from the pod log. Exit codes:
 0 the run succeeded, 1 the agent answered with an error, 2 the environment is
 not complete, 3 the sandbox did not start or answer, 4 no answer in time, 5
 the pod was stopped, 6 the sandbox was not deleted. Each sandbox gets the
 labels `workflow-run=true` and `workflow-agent=<name>`, and the name
 `run-<12 hex of the key>-<start time in base 36>`.
 
+### Environment of `run-receiver`
+
+| Variable | What it holds |
+| --- | --- |
+| `RUN_RECEIVER_TOKEN` | The token of the callers, at least 32 characters, from a Secret |
+| `RUN_RECEIVER_CONFIG` | The list of agents. Default `/etc/run-receiver/agents.yaml` |
+| `POD_NAMESPACE` | Its namespace, from the downward API. Each Job goes there |
+| `RUN_RECEIVER_MAX_INPUT_BYTES`, `RUN_RECEIVER_POLL_SECONDS` | Optional: 262144, and 2 |
+
 ### Environment of `sweep`
 
 `OPENSHELL_GATEWAY_URL`, `OPENSHELL_MTLS_DIR` and `OPENSHELL_GATEWAY_NAME` as
 for the run job, and `SWEEP_MAX_AGE_SECONDS` (default 3600). Set it above the
 `activeDeadlineSeconds` of each template.
+
+### The list of agents and the Job template
+
+[`examples/agents.yaml`](examples/agents.yaml) is the form of the config file,
+and the tests load it. For each agent: a `batch/v1` Job with no name and no
+namespace, `backoffLimit: 0`, an `activeDeadlineSeconds`, `restartPolicy:
+Never`, one container named `run-job` with `AGENT_NAME` set to the name of
+the agent, and no `RUN_KEY` or `RUN_INPUT`. The receiver refuses to start on a
+template that breaks one of these, or that names an agent that the image does
+not have. It changes a template in these places only: `metadata.name`,
+`metadata.namespace`, the label `workflow-agents/agent` (on the Job and the
+pod), the annotations `workflow-agents/run-key` and
+`workflow-agents/fingerprint`, and the two variables.
 
 ### The providers of the Renovate reviewer
 
@@ -118,14 +192,15 @@ is `{"status": "reviewed" | "skipped", "repo", "pr", "head_sha", "verdict",
 
 `task test` builds the image and runs `bin/image-test`, as CI does: a smoke
 test, then each test in `tests/` inside the image. The model, GitHub, the
-trace collector and the OpenShell CLI are fakes in `tests/support/`, on
-127.0.0.1 in the same container.
+trace collector, the Kubernetes API and the OpenShell CLI are fakes in
+`tests/support/`, on 127.0.0.1 in the same container.
 
 | Test | What it covers |
 | --- | --- |
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
-| `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep |
+| `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes |
+| `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep. The whole run on a kind cluster runs in CI only, with `KIND_E2E=1` and the kind setup |
 
 ## Workflow
 

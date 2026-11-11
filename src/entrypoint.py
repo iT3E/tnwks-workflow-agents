@@ -1,6 +1,7 @@
 """The one entrypoint of the image.
 
     entrypoint.py [serve]      the container contract for the agent that AGENT_NAME names
+    entrypoint.py run-receiver the service that makes a run job for each run
     entrypoint.py run-job      one run: a sandbox, the input, the answer, the delete
     entrypoint.py sweep        delete each run sandbox that is older than its time limit
 
@@ -22,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="entrypoint.py")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="serve the container contract (the default)")
+    sub.add_parser("run-receiver", help="serve the run receiver API")
     sub.add_parser("run-job", help="run one workflow agent in a sandbox")
     sweep = sub.add_parser("sweep", help="delete run sandboxes past their time limit")
     sweep.add_argument("--dry-run", action="store_true", help="list, delete nothing")
@@ -32,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
         from contract import server
 
         return server.main()
+    if command == "run-receiver":
+        from run_receiver import app
+
+        return app.main()
     if command == "run-job":
         from run_job import job
 

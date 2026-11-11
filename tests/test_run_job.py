@@ -1,9 +1,15 @@
 """The run job: a sandbox, the input in the body, the answer, and the delete, also when the run fails.
 
-RunJobLocal runs the run job of the image against a fake OpenShell CLI. The
-fake starts the real agent of the image as the "sandbox", with only the
-variables that the run job passes, so the whole run happens: the contract, the
-mock model, the fake GitHub, the answer, the delete.
+Two levels:
+
+* RunJobLocal runs the run job of the image against a fake OpenShell CLI. The
+  fake starts the real agent of the image as the "sandbox", with only the
+  variables that the run job passes, so the whole run happens: the contract,
+  the mock model, the fake GitHub, the answer, the delete.
+* RunJobOnKind runs the whole run on a kind cluster with the sandbox layer: a
+  Job from the template, a real sandbox gateway, a real sandbox. It needs the
+  kind setup of the CI job (the repository of the agent image makes it first),
+  so it skips unless KIND_E2E=1. See the class for what it needs.
 """
 
 import json
@@ -205,6 +211,114 @@ class RunJobLocal(unittest.TestCase):
         self.assertEqual(sorted(self.sandboxes_left()), [fresh])
         deletes = [c[-1] for c in self.calls() if "delete" in c]
         self.assertEqual(deletes, [old])
+
+
+@unittest.skipUnless(os.environ.get("KIND_E2E") == "1", "the whole run on a kind cluster: KIND_E2E=1 in the CI job")
+class RunJobOnKind(unittest.TestCase):
+    """The whole run on a kind cluster. WAITS FOR THE KIND SETUP of the CI job.
+
+    The kind setup (made first in the repository of the agent image) gives:
+      KIND_CONTEXT            the kubectl context of the kind cluster; it must start with `kind-`
+      KIND_NAMESPACE          the namespace of the trust domain, with a sandbox gateway
+      KIND_GATEWAY_URL        the URL of that sandbox gateway
+      KIND_MTLS_SECRET        the Secret with its client certificate (ca.crt, tls.crt, tls.key)
+      KIND_PROVIDERS          the providers made for the test: the mock model, and the fake GitHub
+      KIND_AGENT_ENV          a JSON object of AGENT_ENV_* values: the mock model and fake GitHub URLs
+      IMAGE_REF               this image, loaded into the kind node
+    The test makes a ConfigMap with the sandbox policy, fills the Job template of
+    examples/agents.yaml as the run receiver does, applies it, and reads the result.
+    """
+
+    def kubectl(self, *args, input_text=None, check=True):
+        context = os.environ["KIND_CONTEXT"]
+        if not context.startswith("kind-"):
+            raise RuntimeError("KIND_CONTEXT must be a kind cluster")
+        return subprocess.run(
+            ["kubectl", "--context", context, "-n", os.environ["KIND_NAMESPACE"], *args],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def make_job(self, key: str) -> dict:
+        from run_receiver import app, config
+
+        template = config.load(os.path.join(EXAMPLES, "agents.yaml"))["renovate-reviewer"]
+        image = os.environ["IMAGE_REF"]
+        c = template["spec"]["template"]["spec"]["containers"][0]
+        c["image"] = image
+        c["imagePullPolicy"] = "Never"
+        env = {e["name"]: e for e in c["env"]}
+        env["SANDBOX_IMAGE"]["value"] = image
+        env["SANDBOX_PROVIDERS"]["value"] = os.environ["KIND_PROVIDERS"]
+        env["OPENSHELL_GATEWAY_URL"]["value"] = os.environ["KIND_GATEWAY_URL"]
+        for k, v in json.loads(os.environ["KIND_AGENT_ENV"]).items():
+            env[k] = {"name": k, "value": v}
+        c["env"] = list(env.values())
+        template["spec"]["template"]["spec"]["volumes"][1]["secret"]["secretName"] = os.environ["KIND_MTLS_SECRET"]
+        payload = {"repo": fake_github.REPO, "pr": fake_github.NUMBER, "head_sha": fake_github.HEAD}
+        return config.fill(
+            template,
+            name=app.job_name(key),
+            namespace=os.environ["KIND_NAMESPACE"],
+            agent="renovate-reviewer",
+            key=key,
+            input_json=json.dumps(payload),
+            fingerprint=app.fingerprint("renovate-reviewer", payload),
+        )
+
+    def setUp(self):
+        policy = Path(EXAMPLES, "sandbox-policy.yaml").read_text()
+        cm = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "renovate-reviewer-policy"},
+            "data": {"policy.yaml": policy},
+        }
+        self.kubectl("apply", "-f", "-", input_text=json.dumps(cm))
+
+    def wait_job(self, name: str, timeout: int = 600) -> str:
+        done = self.kubectl(
+            "wait",
+            f"job/{name}",
+            "--for=jsonpath={.status.conditions[0].status}=True",
+            f"--timeout={timeout}s",
+            check=False,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.kubectl("logs", f"job/{name}", "-c", "run-job").stdout
+
+    def run_sandboxes(self) -> list[str]:
+        pods = self.kubectl("get", "sandboxes.agents.x-k8s.io", "-o", "name", check=False).stdout
+        return [p for p in pods.split() if "run-" in p]
+
+    def test_a_whole_run_answers_and_leaves_no_sandbox(self):
+        key = f"kind-run-{int(time.time())}"
+        body = self.make_job(key)
+        self.kubectl("apply", "-f", "-", input_text=json.dumps(body))
+        res = result.find(self.wait_job(body["metadata"]["name"]))
+        self.assertEqual(res["status"], "succeeded", res)
+        self.assertTrue(res["sandbox_deleted"])
+        deadline = time.monotonic() + 120
+        while self.run_sandboxes() and time.monotonic() < deadline:
+            time.sleep(5)
+        self.assertEqual(self.run_sandboxes(), [])
+
+    def test_a_stopped_run_job_leaves_no_sandbox(self):
+        key = f"kind-stop-{int(time.time())}"
+        body = self.make_job(key)
+        self.kubectl("apply", "-f", "-", input_text=json.dumps(body))
+        name = body["metadata"]["name"]
+        deadline = time.monotonic() + 300
+        while not self.run_sandboxes():
+            self.assertLess(time.monotonic(), deadline, "no sandbox was made")
+            time.sleep(2)
+        self.kubectl("delete", "pod", "-l", f"batch.kubernetes.io/job-name={name}", "--wait=false")
+        deadline = time.monotonic() + 180
+        while self.run_sandboxes() and time.monotonic() < deadline:
+            time.sleep(5)
+        self.assertEqual(self.run_sandboxes(), [])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # One image for each part of the run path of a workflow agent: the container
-# contract of each agent, the run job and the sweep. One
+# contract of each agent, the run receiver, the run job and the sweep. One
 # entrypoint; its first argument names the part, and AGENT_NAME names the agent
 # that `serve` starts (README, "The image contract").
 
@@ -38,7 +38,7 @@ FROM ${PYTHON_IMAGE}
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="tnwks-workflow-agents" \
-      org.opencontainers.image.description="Workflow agents with the container contract, and their run job" \
+      org.opencontainers.image.description="Workflow agents with the container contract, their run receiver and their run job" \
       org.opencontainers.image.source="https://github.com/iT3E/tnwks-workflow-agents" \
       org.opencontainers.image.url="https://github.com/iT3E/tnwks-workflow-agents" \
       org.opencontainers.image.vendor="tnwks" \
