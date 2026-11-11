@@ -45,6 +45,8 @@ try:
         code, data = r.status, r.read()
 except urllib.error.HTTPError as e:
     code, data = e.code, e.read()
+except Exception as e:  # no answer: the test may try again
+    code, data = 0, repr(e).encode()
 print(json.dumps({"status": code, "body": data.decode()}))
 """
 
@@ -56,11 +58,28 @@ def kx(*args, check=True, timeout=600, input_text=None) -> subprocess.CompletedP
         raise RuntimeError("IMAGE_TEST_KUBECONFIG is not set: no kubectl call without the test cluster")
     kubectl = os.environ.get("IMAGE_TEST_KUBECTL", "kubectl")
     cmd = [kubectl, "--kubeconfig", kubeconfig, "--context", f"kind-{manifests.CLUSTER}", *args]
-    return subprocess.run(cmd, check=check, timeout=timeout, capture_output=True, text=True, input=input_text)
+    done = subprocess.run(cmd, check=False, timeout=timeout, capture_output=True, text=True, input=input_text)
+    if check and done.returncode != 0:
+        raise AssertionError(f"kubectl {' '.join(args[:4])} exited {done.returncode}: {done.stderr[-2000:]}")
+    return done
 
 
 def http(method: str, url: str, token: str = "", body: dict | None = None, timeout: int = 60) -> tuple[int, object]:
-    """One HTTP call from inside the cluster, from the pod of the fake GitHub."""
+    """One HTTP call from inside the cluster, from the pod of the fake GitHub.
+
+    A call with no answer (a Service that is not ready yet) is tried again: each
+    call of the test can be sent twice, and POST /runs keeps one run for one key.
+    """
+    for attempt in range(6):
+        code, answer = _http(method, url, token, body, timeout)
+        if code != 0:
+            return code, answer
+        print(f"no answer from {url} ({answer}), attempt {attempt + 1}")
+        time.sleep(5)
+    return code, answer
+
+
+def _http(method: str, url: str, token: str, body: dict | None, timeout: int) -> tuple[int, object]:
     data = json.dumps(body) if body is not None else ""
     out = kx(
         "-n",
@@ -146,6 +165,10 @@ class RunJobOnKind(unittest.TestCase):
         print(f"\nPOST /runs: {code} in {time.monotonic() - start:.0f} s: {json.dumps(body)[:1500]}")
         if isinstance(body, dict) and body.get("job"):
             print("the run job log:\n" + job_log(body["job"]))
+        github = seen(SUPPORT_NS, "github", GITHUB_PORT)
+        model = seen("ai", "litellm-app", 4000)
+        traces = seen("monitoring", "alloy", 4318)
+        print(f"fake GitHub: {github}\nfake model: {[(r['path'], r['auth']) for r in model]}\ncollector: {traces}")
         self.assertEqual(code, 200, body)
         self.assertEqual(body["status"], "succeeded")
         self.assertTrue(body["created"])
@@ -154,10 +177,6 @@ class RunJobOnKind(unittest.TestCase):
 
         # The credentials: each call of the sandbox reached the fakes with the
         # test credential, which only the providers hold.
-        github = seen(SUPPORT_NS, "github", GITHUB_PORT)
-        model = seen("ai", "litellm-app", 4000)
-        traces = seen("monitoring", "alloy", 4318)
-        print(f"fake GitHub: {github}\nfake model: {[(r['path'], r['auth']) for r in model]}\ncollector: {traces}")
         self.assertTrue(model, "no call reached the model gateway")
         self.assertEqual({r["auth"] for r in model}, {"key"})
         self.assertEqual({r["auth"] for r in github}, {"key"})
