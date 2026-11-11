@@ -1,0 +1,7 @@
+# Deny everything, then allow only what the Dockerfile copies.
+**
+!Dockerfile
+!requirements.txt
+!constraints.txt
+!src/**
+src/**/__pycache__

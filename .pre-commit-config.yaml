@@ -1,0 +1,43 @@
+---
+# Managed by Copier from https://github.com/iT3E/app-repo-template. Hook versions
+# move with template releases (Renovate bumps them in the template).
+# Install once per clone: task precommit:init   (bin/install-hooks)
+# Run everything:         task precommit:run
+fail_fast: false
+# commit-msg runs the privacy check on the message. bin/install-hooks
+# installs both hook types.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+repos:
+  # Secret scanning on staged changes. Config: .betterleaks.toml. The same
+  # scan runs in CI (.github/workflows/secret-scan.yaml), so a clone without
+  # hooks installed is still covered.
+  - repo: https://github.com/betterleaks/betterleaks
+    # renovate: datasource=github-tags depName=betterleaks/betterleaks
+    rev: v1.10.0
+    hooks:
+      - id: betterleaks
+  - repo: local
+    hooks:
+      # Family names and personal emails (bin/privacy-check, AGENTS.md
+      # "Privacy"): the staged files and your git identity, then the commit
+      # message. The denylist comes from $PRIVACY_TERMS or a tnwks-ops
+      # checkout next to this one; CI runs the same checks.
+      - id: privacy-check
+        name: privacy-check
+        entry: bin/privacy-check --cached
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: privacy-check-message
+        name: privacy-check (commit message)
+        entry: bin/privacy-check --message
+        language: system
+        stages: [commit-msg]
+        always_run: true
+  # Formatter. CI runs ruff only where the repo turned it on (build.yaml).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # renovate: datasource=github-tags depName=astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-format

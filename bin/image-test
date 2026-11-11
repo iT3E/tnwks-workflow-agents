@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# The image tests: what CI runs on the built image before any push
+# (build.yaml, image job, test-command) and what `task test` runs locally.
+#
+#   bin/image-test IMAGE
+#
+# 1. Smoke: the entrypoint, the user, and no file of state or credentials in
+#    the image.
+# 2. The tests in tests/, inside the image, with the code of the image. Each
+#    fake (model, GitHub, trace collector) listens on 127.0.0.1 in the same
+#    container: no real model or GitHub call.
+set -euo pipefail
+
+image="${1:?usage: image-test IMAGE}"
+cd "$(git rev-parse --show-toplevel)"
+
+echo "::group::Smoke test"
+docker run --rm "${image}" --help >/dev/null
+test "$(docker run --rm --entrypoint id "${image}" -u)" = "10001"
+test "$(docker run --rm --entrypoint id "${image}" -g)" = "10001"
+# With no command the image serves AGENT_NAME; with no agent it must refuse (exit 2).
+rc=0; docker run --rm "${image}" >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::serve with no AGENT_NAME exited ${rc}, expected 2"; exit 1
+fi
+# Code only under /app; no state, key or env file anywhere we put files.
+found="$(docker run --rm --entrypoint sh "${image}" -c \
+  'find /app /tmp -type f \( -name "*.env" -o -name ".env*" -o -name "*.pem" -o -name "*.key" -o -name "*.crt" -o -name "*.sqlite*" -o -name "*.db" \) 2>/dev/null')"
+if [ -n "${found}" ]; then
+  echo "::error::state or credential files in the image: ${found}"; exit 1
+fi
+echo "::endgroup::"
+
+echo "::group::Tests"
+docker run --rm --init --read-only --tmpfs /tmp:rw,exec,size=256m \
+  -v "${PWD}/tests:/tests:ro" -w /tests \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  --entrypoint python3 "${image}" -m unittest discover -s /tests -t /tests -v
+echo "::endgroup::"
