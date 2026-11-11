@@ -8,4 +8,25 @@
     "github>iT3E/github-workflows//renovate/default.json5#v1.8.1",
     "github>iT3E/github-workflows//renovate/python.json5#v1.8.1",
   ],
+  // The OpenShell CLI of the run job, in the Dockerfile. Its release must
+  // match the sandbox gateway chart in tnwks-ops, and a new release needs
+  // its two checksums by hand (the build fails until they match), so it is
+  // never merged by Renovate.
+  customManagers: [
+    {
+      customType: "regex",
+      description: "The OpenShell CLI release in the Dockerfile",
+      managerFilePatterns: ["/^Dockerfile$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG OPENSHELL_VERSION=(?<currentValue>\\S+)",
+      ],
+    },
+  ],
+  packageRules: [
+    {
+      description: "The OpenShell CLI: reviewed, with its checksums and the chart release in tnwks-ops",
+      matchDepNames: ["NVIDIA/OpenShell"],
+      automerge: false,
+    },
+  ],
 }

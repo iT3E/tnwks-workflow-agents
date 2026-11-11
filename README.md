@@ -18,6 +18,8 @@ trigger --POST /runs, token--> run receiver --Job from the template--> run job
 | --- | --- | --- |
 | The container contract | `src/contract/` | `POST /invocations` and `GET /ping` on port 8080 for the agent that `AGENT_NAME` names. It flushes the spans of a run before its answer, and keeps the text of a run out of each span |
 | The workflow agents | `src/agents/<name>/` | One package each: its loop, its prompt, its tools. Today: `renovate-reviewer` |
+| The run job | `src/run_job/job.py` | Starts a sandbox, sends the input, prints the answer, deletes the sandbox |
+| The sweep | `src/run_job/sweep.py` | Deletes each run sandbox that is older than its time limit |
 
 ## The image contract
 
@@ -26,11 +28,14 @@ trigger --POST /runs, token--> run receiver --Job from the template--> run job
 | Image | `ghcr.io/it3e/tnwks-workflow-agents:<version>@sha256:<digest>`. A `vX.Y.Z` release pushes `:X.Y.Z` and `:sha-<short>`. `main` pushes nothing, and nothing pushes `:latest` |
 | User | UID 10001, GID 10001, `HOME=/tmp`. Code in `/app/src`, read-only |
 | Entrypoint | `python3 /app/src/entrypoint.py`, default command `serve` |
+| Root file system | Read-only works. The run job and the sweep need `/tmp` writable (an `emptyDir`): the CLI config goes there |
 | Port | 8080 for `serve` |
 
 | Command (`args`) | Part | Kubernetes rights of its service account |
 | --- | --- | --- |
 | `serve` (or none) | A workflow agent, for the agent of `AGENT_NAME` | None. In a sandbox it has no service account token |
+| `run-job` | The run job, a Job from the template | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate only |
+| `sweep [--dry-run]` | The time limit of the sandboxes, a CronJob | None, as the run job |
 
 ### Environment of `serve` (the agent, in the sandbox)
 
@@ -52,6 +57,39 @@ The `renovate-reviewer` agent adds:
 | `GITHUB_API_URL` | Optional, default `https://api.github.com` |
 | `REVIEWER_REPOSITORIES` | The repositories it may review, comma separated. Any other gets `400` |
 | `REVIEWER_MAX_TURNS`, `MODEL_MAX_TOKENS` | Optional limits: model calls in one run (40), output tokens in one call (8192) |
+
+### Environment of `run-job`
+
+The Job template of each agent sets these. The run receiver adds `RUN_KEY`
+and `RUN_INPUT`.
+
+| Variable | What it holds |
+| --- | --- |
+| `AGENT_NAME` | The agent. It must be the name of the template in the list |
+| `RUN_KEY`, `RUN_INPUT` | The key of the run, and the input as a JSON object. Set by the receiver |
+| `SANDBOX_IMAGE` | The image of the sandbox: this image, at the same digest as the run job |
+| `SANDBOX_POLICY` | The path of the sandbox policy file (a ConfigMap). It must list `/app` as read-only ([`examples/sandbox-policy.yaml`](examples/sandbox-policy.yaml)) |
+| `SANDBOX_PROVIDERS` | The providers of the agent, comma separated |
+| `SANDBOX_CPU`, `SANDBOX_MEMORY` | Optional limits of the sandbox |
+| `AGENT_ENV_<NAME>` | Sets `<NAME>` in the sandbox, for example `AGENT_ENV_MODEL_ID`. One line, at most 8 KiB. A name with KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or PRIVATE is refused: a credential goes through a provider |
+| `OPENSHELL_GATEWAY_URL` | The sandbox gateway of the trust domain, `https://<service>.<namespace>.svc.cluster.local:8080` |
+| `OPENSHELL_MTLS_DIR` | The client certificate (`ca.crt`, `tls.crt`, `tls.key`), from the Secret. Default `/etc/openshell/mtls` |
+| `OPENSHELL_GATEWAY_NAME` | The name of the gateway in the CLI config. Default `workflows` |
+| `READY_TIMEOUT_SECONDS`, `RUN_TIMEOUT_SECONDS` | The wait for `/ping` (180) and for the answer (1800) |
+
+The run job prints one result line, `workflow-run-result: {...}`, as its last
+line on standard output; the run receiver reads it from the pod log. Exit codes:
+0 the run succeeded, 1 the agent answered with an error, 2 the environment is
+not complete, 3 the sandbox did not start or answer, 4 no answer in time, 5
+the pod was stopped, 6 the sandbox was not deleted. Each sandbox gets the
+labels `workflow-run=true` and `workflow-agent=<name>`, and the name
+`run-<12 hex of the key>-<start time in base 36>`.
+
+### Environment of `sweep`
+
+`OPENSHELL_GATEWAY_URL`, `OPENSHELL_MTLS_DIR` and `OPENSHELL_GATEWAY_NAME` as
+for the run job, and `SWEEP_MAX_AGE_SECONDS` (default 3600). Set it above the
+`activeDeadlineSeconds` of each template.
 
 ### The providers of the Renovate reviewer
 
@@ -79,14 +117,15 @@ is `{"status": "reviewed" | "skipped", "repo", "pr", "head_sha", "verdict",
 ## Tests
 
 `task test` builds the image and runs `bin/image-test`, as CI does: a smoke
-test, then each test in `tests/` inside the image. The model, GitHub and the
-trace collector are fakes in `tests/support/`, on 127.0.0.1 in the same
-container.
+test, then each test in `tests/` inside the image. The model, GitHub, the
+trace collector and the OpenShell CLI are fakes in `tests/support/`, on
+127.0.0.1 in the same container.
 
 | Test | What it covers |
 | --- | --- |
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
+| `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep |
 
 ## Workflow
 
@@ -105,4 +144,5 @@ CI from [iT3E/github-workflows](https://github.com/iT3E/github-workflows);
 - Renovate keeps dependencies current. Patch, digest and non-0.x minor
   updates merge themselves once CI is green; majors wait for review on the
   Renovate Dashboard issue. Template releases arrive as their own
-  `renovate/template` PRs.
+  `renovate/template` PRs. The OpenShell CLI never merges by itself: its
+  checksums change by hand, with the chart release in tnwks-ops.

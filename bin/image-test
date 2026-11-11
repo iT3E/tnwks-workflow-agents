@@ -4,11 +4,11 @@
 #
 #   bin/image-test IMAGE
 #
-# 1. Smoke: the entrypoint, the user, and no file of state or credentials in
-#    the image.
+# 1. Smoke: the entrypoint, the user, the OpenShell CLI, and no file of state
+#    or credentials in the image.
 # 2. The tests in tests/, inside the image, with the code of the image. Each
-#    fake (model, GitHub, trace collector) listens on 127.0.0.1 in the same
-#    container: no real model or GitHub call.
+#    fake (model, GitHub, collector, OpenShell CLI) listens on
+#    127.0.0.1 in the same container: no real model, GitHub or sandbox call.
 set -euo pipefail
 
 image="${1:?usage: image-test IMAGE}"
@@ -18,10 +18,15 @@ echo "::group::Smoke test"
 docker run --rm "${image}" --help >/dev/null
 test "$(docker run --rm --entrypoint id "${image}" -u)" = "10001"
 test "$(docker run --rm --entrypoint id "${image}" -g)" = "10001"
+docker run --rm --entrypoint openshell "${image}" --version
 # With no command the image serves AGENT_NAME; with no agent it must refuse (exit 2).
 rc=0; docker run --rm "${image}" >/dev/null 2>&1 || rc=$?
 if [ "${rc}" -ne 2 ]; then
   echo "::error::serve with no AGENT_NAME exited ${rc}, expected 2"; exit 1
+fi
+rc=0; docker run --rm "${image}" run-job >/dev/null 2>&1 || rc=$?
+if [ "${rc}" -ne 2 ]; then
+  echo "::error::run-job with no config exited ${rc}, expected 2"; exit 1
 fi
 # Code only under /app; no state, key or env file anywhere we put files.
 found="$(docker run --rm --entrypoint sh "${image}" -c \
@@ -33,7 +38,7 @@ echo "::endgroup::"
 
 echo "::group::Tests"
 docker run --rm --init --read-only --tmpfs /tmp:rw,exec,size=256m \
-  -v "${PWD}/tests:/tests:ro" -w /tests \
+  -v "${PWD}/tests:/tests:ro" -v "${PWD}/examples:/examples:ro" -w /tests \
   -e PYTHONDONTWRITEBYTECODE=1 \
   --entrypoint python3 "${image}" -m unittest discover -s /tests -t /tests -v
 echo "::endgroup::"
