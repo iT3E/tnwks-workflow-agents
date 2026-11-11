@@ -1,3 +1,0 @@
-kind: Added
-body: 'The image of the workflow agents, from the app template: the container contract (POST /invocations and GET /ping on port 8080, with the spans flushed before each answer and no text of a run in a span), and the Renovate reviewer as a Strands agent with read tools only and one review comment for each head'
-time: 2026-11-11T01:23:49.214040272-08:00
