@@ -55,7 +55,10 @@ log = logging.getLogger("run_job")
 AGENT_COMMAND = ["python3", "/app/src/entrypoint.py", "serve"]
 ENV_PREFIX = "AGENT_ENV_"
 SECRET_WORDS = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE", re.IGNORECASE)
-NAME_PATTERN = re.compile(r"^run-[0-9a-f]{12}-[0-9a-z]{1,8}$")
+# OpenShell 0.1.7 refuses a sandbox name longer than 19 characters (seen on
+# the kind cluster of CI): run-<7 hex>-<6 or 7 base36> is 18 or 19.
+MAX_NAME_LENGTH = 19
+NAME_PATTERN = re.compile(r"^run-[0-9a-f]{7}-[0-9a-z]{1,7}$")
 RUN_LABEL = "workflow-run"
 AGENT_LABEL = "workflow-agent"
 DELETE_ATTEMPTS = 3
@@ -80,8 +83,8 @@ def base36(n: int) -> str:
 
 
 def sandbox_name(key: str, now: float) -> str:
-    """run-<12 hex of the key>-<start time in base 36>. The sweep reads the time back from it."""
-    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:12]}-{base36(int(now))}"
+    """run-<7 hex of the key>-<start time in base 36>. The sweep reads the time back from it."""
+    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:7]}-{base36(int(now))}"
 
 
 def started_at(name: str) -> int | None:
