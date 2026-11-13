@@ -38,6 +38,9 @@ NAME = "renovate-reviewer"
 MARKER = "<!-- workflow-agent: renovate-reviewer head={sha} -->"
 MARKER_PATTERN = re.compile(r"<!-- workflow-agent: renovate-reviewer head=([0-9a-f]{40}) -->")
 VERDICT_PATTERN = re.compile(r"^\s*\**\s*verdict\s*\**\s*:\s*\**\s*`?([a-z-]+)`?", re.IGNORECASE | re.MULTILINE)
+# A line that holds the verdict and nothing else, as the prompt asks the model
+# to start with. The head of the comment already says the verdict.
+VERDICT_LINE = re.compile(r"^\s*\**\s*verdict\s*\**\s*:\s*\**\s*`?[a-z-]+`?\s*\**\s*\.?\s*$", re.IGNORECASE)
 FOOTER = "This review is advice from a workflow agent. It does not approve, merge or change a label. The owner decides."
 REQUIRED = ("MODEL_GATEWAY_URL", "MODEL_GATEWAY_KEY", "GITHUB_TOKEN", "REVIEWER_REPOSITORIES")
 DEFAULT_MODEL_ID = "agents-workflows"
@@ -89,13 +92,21 @@ def verdict_of(text: str) -> str:
     return "unclear"
 
 
+def without_verdict_line(review: str) -> str:
+    """The review without its first line when that line is only the verdict."""
+    lines = review.strip().splitlines()
+    if lines and VERDICT_LINE.match(lines[0]):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
 def comment_body(sha: str, verdict: str, review: str) -> str:
     return "\n".join(
         [
             MARKER.format(sha=sha),
             f"**Review of `{sha[:7]}`.** Verdict: `{verdict}`.",
             "",
-            review.strip(),
+            without_verdict_line(review),
             "",
             "---",
             f"_{FOOTER}_",

@@ -119,6 +119,8 @@ class Receiver:
             await self.kube.annotate_job(self.namespace, name, {RESULT_ANNOTATION: text})
         except KubeError as e:
             log.warning("run %s: the result is not kept: %s", name, e)
+        else:
+            log.info("run %s: result kept (%s)", name, found.get("status") or "the pod is gone")
 
     async def result_of(self, job: dict) -> dict:
         """The result of an ended run: the kept one, or the one in the log of its pod (and then kept)."""
@@ -306,8 +308,22 @@ def create_app(receiver: Receiver) -> FastAPI:
     return app
 
 
-def main() -> int:
+def configure_logging() -> None:
+    """INFO for the receiver; WARNING for httpx.
+
+    httpx logs each request at INFO, and the loop that keeps the results reads
+    the Jobs every RUN_RECEIVER_RECORD_SECONDS: one line each round, about
+    8,600 a day, with nothing in them. The receiver logs its own line when it
+    makes a Job and when it keeps a result, and an error of the cluster API
+    still gets to the log. (The run job keeps the httpx lines of its calls to
+    the sandbox: it configures its own logging.)
+    """
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def main() -> int:
+    configure_logging()
     try:
         templates = config.load(os.environ.get("RUN_RECEIVER_CONFIG", "/etc/run-receiver/agents.yaml"))
         receiver = Receiver(

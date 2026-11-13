@@ -7,6 +7,7 @@ the name, the key and the input.
 
 import copy
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -331,6 +332,34 @@ class KeptResult(ReceiverTest):
         self.assertEqual(r.json()["status"], "succeeded")
         self.assertIs(r.json()["output_kept"], False)
         self.assertNotIn("output", r.json())
+
+
+class Logging(ReceiverTest):
+    record_seconds = 0.05
+    OUTPUT = {"status": "skipped", "reason": "the pull request is closed"}
+
+    def kept(self, key):
+        return self.kube.annotations(receiver_app.job_name(key)).get(receiver_app.RESULT_ANNOTATION)
+
+    def test_an_idle_round_of_the_loop_logs_nothing_and_a_kept_result_logs_one_line(self):
+        root, httpx_logger = logging.getLogger(), logging.getLogger("httpx")
+        saved = (root.level, list(root.handlers), httpx_logger.level)
+        self.addCleanup(
+            lambda: (root.setLevel(saved[0]), setattr(root, "handlers", saved[1]), httpx_logger.setLevel(saved[2]))
+        )
+        receiver_app.configure_logging()
+        self.assertEqual(httpx_logger.getEffectiveLevel(), logging.WARNING)
+        self.assertLessEqual(logging.getLogger("run_receiver").getEffectiveLevel(), logging.INFO)
+        with self.assertNoLogs(level="INFO"):
+            time.sleep(0.3)  # idle rounds of the loop
+        key = "logged-1"
+        self.post(key=key, wait=False)
+        with self.assertLogs("run_receiver", level="INFO") as seen:
+            self.kube.finish(receiver_app.job_name(key), log=result_log(status="succeeded", output=self.OUTPUT))
+            wait_until("kept result", lambda: self.kept(key))
+            time.sleep(0.2)
+        name = receiver_app.job_name(key)
+        self.assertEqual(seen.output, [f"INFO:run_receiver:run {name}: result kept (succeeded)"])
 
 
 class ResultGone(ReceiverTest):
