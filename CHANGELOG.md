@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.1.3 - 2026-11-13
+
+### Fixed
+
+* renovate reviewer: the comment says the verdict once (a first line of the model text that holds only the verdict is dropped). run receiver: no httpx line for each idle round of the loop that keeps the results (httpx logs at WARNING in the receiver), and one INFO line when the loop keeps a result. The README gives the retry rule of a caller: an attempt number in the key
+
 ## v0.1.2 - 2026-11-13
 
 ### Fixed
