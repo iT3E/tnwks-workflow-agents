@@ -136,32 +136,58 @@ def fakes(image: str) -> list:
 
 
 def setup(image: str) -> list:
+    """The first run of the providers script of tnwks-ops: it imports the profiles and makes the providers."""
+    return providers_sync(image, "kind-setup", fake_github.TOKEN, "")
+
+
+def providers_sync(image: str, name: str, github_token: str, note: str) -> list:
+    """A run of scripts/providers.sh of tnwks-ops (a copy: tests/kind/ops_providers.sh), as its CronJob runs it.
+
+    An init container writes the profiles of the test cluster (profiles.py,
+    with `note` as a change of the model gateway profile) to /profiles. The
+    token script of the GitHub App is a stub that prints `github_token`.
+    """
     providers = REPO / "examples" / "providers"
-    files = {
-        "setup.sh": (HERE / "setup.sh").read_text(),
-        "profiles.py": (HERE / "profiles.py").read_text(),
-    }
+    files = {"profiles.py": (HERE / "profiles.py").read_text()}
     for p in sorted(providers.glob("*.yaml")):
         files[p.name] = p.read_text()
+    scripts = {
+        "providers.sh": (HERE / "ops_providers.sh").read_text(),
+        "github_app_token.py": (HERE / "token_stub.py").read_text(),
+    }
+    profiles = {"name": "profiles", "emptyDir": {"sizeLimit": "1Mi"}}
+    init = container(
+        "profiles",
+        image,
+        command=["python3", "/setup/profiles.py", "/setup", "/profiles", GITHUB_HOST, str(GITHUB_PORT), note],
+        volumeMounts=[
+            {"name": "setup", "mountPath": "/setup", "readOnly": True},
+            {"name": "profiles", "mountPath": "/profiles"},
+        ],
+    )
     env = {
-        "GATEWAY_URL": GATEWAY_URL,
-        "MODEL_KEY": mock_model.KEY,
-        "GITHUB_KEY": fake_github.TOKEN,
-        "FAKE_GITHUB_HOST": GITHUB_HOST,
-        "FAKE_GITHUB_PORT": str(GITHUB_PORT),
+        "OPENSHELL_GATEWAY_URL": GATEWAY_URL,
+        "NO_COLOR": "1",
+        "MODEL_GATEWAY_KEY": mock_model.KEY,
+        "FAKE_GITHUB_TOKEN": github_token,
         "HOME": "/tmp",
     }
     c = container(
-        "setup",
+        "providers",
         image,
-        command=["sh", "/setup/setup.sh"],
+        command=["sh", "/scripts/providers.sh"],
         env=[{"name": k, "value": v} for k, v in env.items()],
-        volumeMounts=[{"name": "setup", "mountPath": "/setup", "readOnly": True}, MTLS_MOUNT, TMP_MOUNT],
+        volumeMounts=[
+            {"name": "profiles", "mountPath": "/profiles", "readOnly": True},
+            {"name": "scripts", "mountPath": "/scripts", "readOnly": True},
+            MTLS_MOUNT,
+            TMP_MOUNT,
+        ],
     )
     job = {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": "kind-setup", "namespace": WORKFLOWS_NS},
+        "metadata": {"name": name, "namespace": WORKFLOWS_NS},
         "spec": {
             "backoffLimit": 0,
             "template": {
@@ -169,13 +195,20 @@ def setup(image: str) -> list:
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
                     "securityContext": POD_SECURITY,
+                    "initContainers": [init],
                     "containers": [c],
-                    "volumes": [{"name": "setup", "configMap": {"name": "kind-setup"}}, MTLS, TMP],
+                    "volumes": [
+                        {"name": "setup", "configMap": {"name": f"{name}-setup"}},
+                        {"name": "scripts", "configMap": {"name": f"{name}-scripts"}},
+                        profiles,
+                        MTLS,
+                        TMP,
+                    ],
                 }
             },
         },
     }
-    return [config_map("kind-setup", WORKFLOWS_NS, files), job]
+    return [config_map(f"{name}-setup", WORKFLOWS_NS, files), config_map(f"{name}-scripts", WORKFLOWS_NS, scripts), job]
 
 
 def receiver(image: str, agents_file: str, token: str) -> list:

@@ -255,6 +255,59 @@ class RunJobOnKind(unittest.TestCase):
         print(f"GET /runs after the stop: {code} {state}")
         self.assertEqual(state["status"], "failed", state)
 
+    def test_4_the_providers_script_of_tnwks_ops_runs_again_and_a_new_sandbox_gets_the_newest_token(self):
+        """Three more runs of scripts/providers.sh of tnwks-ops (the setup Job was its first run).
+
+        Each run sets a new GitHub token; the third also changes the model
+        gateway profile in "git". A run after the second (a wrong token) must
+        fail at GitHub, and a run after the third (the right token) must reach
+        it with that token: a new sandbox gets the newest value at its proxy.
+        """
+        runs = [
+            ("sync-1", "rotated-token-1", ""),
+            ("sync-2", "rotated-token-2", ""),
+            ("sync-3", fake_github.TOKEN, "changed in git"),
+        ]
+        logs = {}
+        for name, token, note in runs:
+            kx("apply", "-f", "-", input_text=manifests.as_list(manifests.providers_sync(IMAGE, name, token, note)))
+            state = wait_job(name)
+            logs[name] = job_log(name, "providers")
+            print(f"\n== {name} ({state}):\n{logs[name]}")
+            self.assertEqual(state, "Complete", logs[name])
+            if name == "sync-2":
+                self.check_run_at_github("other")
+        expect = {
+            "sync-1": ["profile workflow-github-reviewer: unchanged", "profile workflow-model-gateway: unchanged"],
+            "sync-2": ["profile workflow-github-reviewer: unchanged", "profile workflow-model-gateway: unchanged"],
+            "sync-3": ["profile workflow-github-reviewer: unchanged", "profile workflow-model-gateway: updated"],
+        }
+        for name, profiles in expect.items():
+            lines = logs[name].splitlines()
+            for line in profiles + [
+                "provider model-gateway: updated",
+                "provider github-reviewer: updated",
+                "workflow-providers result=ok",
+            ]:
+                self.assertIn(line, lines, f"{name}: {line}")
+        self.check_run_at_github("key")
+
+    def check_run_at_github(self, auth: str):
+        """A new run (a new sandbox) of the reviewer, and the token that its calls brought to the fake GitHub."""
+        before = len(seen(SUPPORT_NS, "github", GITHUB_PORT))
+        key = f"kind-token-{uuid.uuid4().hex[:8]}"
+        code, body = self.post_run(key, self.input)
+        print(f"run {key}: {code} {json.dumps(body)[:600]}")
+        calls = seen(SUPPORT_NS, "github", GITHUB_PORT)[before:]
+        print(f"its calls at the fake GitHub: {[(r['method'], r['path'], r['auth']) for r in calls]}")
+        self.assertTrue(calls, "no call reached the fake GitHub")
+        self.assertEqual({r["auth"] for r in calls}, {auth})
+        if auth == "key":
+            self.assertEqual(code, 200, body)
+        else:
+            self.assertEqual(code, 502, body)
+        wait_for("no run sandbox left", lambda: not run_sandboxes(), 180)
+
 
 if __name__ == "__main__":
     unittest.main()
