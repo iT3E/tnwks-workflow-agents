@@ -160,6 +160,31 @@ class Parts(unittest.TestCase):
         self.assertEqual(reviewer.verdict_of("Verdict: merge it"), "unclear")
         self.assertEqual(reviewer.verdict_of("no verdict line"), "unclear")
 
+    def test_the_comment_says_the_verdict_once(self):
+        sha = fake_github.HEAD
+        for review in [
+            "Verdict: ready\n\n**What changes.** The chart moves.",
+            "**Verdict:** `ready`\n\n**What changes.** The chart moves.",
+            "\n  verdict: Ready.  \n**What changes.** The chart moves.",
+        ]:
+            with self.subTest(review=review):
+                body = reviewer.comment_body(sha, "ready", review)
+                self.assertEqual(body.lower().count("verdict"), 1, body)
+                head = body.splitlines()
+                self.assertEqual(head[1], f"**Review of `{sha[:7]}`.** Verdict: `ready`.")
+                self.assertEqual(head[3], "**What changes.** The chart moves.")
+
+    def test_a_review_with_no_verdict_line_first_is_kept_as_it_is(self):
+        sha = fake_github.HEAD
+        for review in [
+            "**What changes.** The chart moves.\n\nVerdict: ready",
+            "Verdict: ready, because the chart only moves a patch version.\n**What changes.** x",
+            "**What changes.** The verdict is clear.",
+        ]:
+            with self.subTest(review=review):
+                body = reviewer.comment_body(sha, "ready", review)
+                self.assertIn(review.strip(), body)
+
     def test_a_file_path_cannot_leave_the_repository(self):
         pr = PullRequest("http://127.0.0.1:9", "t", fake_github.REPO, 1)
         for path in ["../secrets", "/etc/passwd", "a/../../b", "a\\b", ""]:

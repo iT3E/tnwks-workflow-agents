@@ -63,6 +63,21 @@ agent or input it gets `409`. The Job, and so the key, stays until
 `ttlSecondsAfterFinished` of the template (7 days in the example); after that
 the same key makes a new run.
 
+**A retry is a new key.** The same key always gets the same answer, also a
+failure, for as long as the Job stays. So a caller that tries again puts an
+attempt number at the end of the key, for example
+`renovate-review-<pr>-<sha7>-<n>` with `n` from 1:
+
+- It tries again only after a `failed` (`502`) or `timed_out` (`504`)
+  answer, with `n + 1`, and at most 3 attempts in all. It never tries again
+  after a `2xx` answer.
+- After a call with no answer (a lost connection, a `503`), it calls again
+  with the same key: that gets the same run, not a second one.
+- The receiver does not change for this: each attempt is its own Job, and the
+  Job of each attempt stays as a record. The agent itself must be safe to run
+  twice for the same work (the Renovate reviewer posts one comment for each
+  head).
+
 **The answer stays with the Job, not with its pod.** The answer of a run is
 the result line in the log of its pod, and a cluster can delete the pod of an
 ended Job long before the Job (the pod GC, `terminated-pod-gc-threshold`).
