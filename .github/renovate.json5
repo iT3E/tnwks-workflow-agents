@@ -5,8 +5,8 @@
   // template update moves the pin. Repo-only rules go below the extends;
   // copier update keeps them.
   extends: [
-    "github>iT3E/github-workflows//renovate/default.json5#v1.8.1",
-    "github>iT3E/github-workflows//renovate/python.json5#v1.8.1",
+    "github>iT3E/github-workflows//renovate/default.json5#v1.9.2",
+    "github>iT3E/github-workflows//renovate/python.json5#v1.9.2",
   ],
   // The OpenShell CLI of the run job, in the Dockerfile. Its release must
   // match the sandbox gateway chart in tnwks-ops, and a new release needs
