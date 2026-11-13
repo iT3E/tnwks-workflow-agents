@@ -1,20 +1,24 @@
 """The Kubernetes API calls of the run receiver, in its own namespace only.
 
-    POST /apis/batch/v1/namespaces/{ns}/jobs                   create   jobs
-    GET  /apis/batch/v1/namespaces/{ns}/jobs/{name}            get      jobs
-    GET  /api/v1/namespaces/{ns}/pods?labelSelector=...        list     pods
-    GET  /api/v1/namespaces/{ns}/pods/{name}/log               get      pods/log
+    POST  /apis/batch/v1/namespaces/{ns}/jobs                  create   jobs
+    GET   /apis/batch/v1/namespaces/{ns}/jobs/{name}           get      jobs
+    GET   /apis/batch/v1/namespaces/{ns}/jobs?labelSelector=   list     jobs
+    PATCH /apis/batch/v1/namespaces/{ns}/jobs/{name}           patch    jobs (an annotation only)
+    GET   /api/v1/namespaces/{ns}/pods?labelSelector=...       list     pods
+    GET   /api/v1/namespaces/{ns}/pods/{name}/log              get      pods/log
 
 In a pod, the client uses the service account token and CA of the pod. The
 token file is read again for each call, because Kubernetes rotates it.
 """
 
+import json
 import os
 
 import httpx
 
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 LOG_LIMIT_BYTES = 4 * 1024 * 1024
+ENDED_PHASES = ("Succeeded", "Failed")
 
 
 class KubeError(RuntimeError):
@@ -59,9 +63,9 @@ class Kube:
         except OSError:
             return {}
 
-    async def _call(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _call(self, method: str, path: str, headers_extra: dict | None = None, **kwargs) -> httpx.Response:
         try:
-            return await self.http.request(method, path, headers=self._headers(), **kwargs)
+            return await self.http.request(method, path, headers=self._headers() | (headers_extra or {}), **kwargs)
         except httpx.HTTPError as e:
             raise KubeError(f"{method} {path}: {type(e).__name__}") from e
 
@@ -82,8 +86,25 @@ class Kube:
             raise KubeError(f"get job: {r.status_code}")
         return r.json()
 
-    async def job_log(self, namespace: str, job_name: str, container: str) -> str:
-        """The log of the newest pod of the Job, or '' when it has none."""
+    async def list_jobs(self, namespace: str, selector: str) -> list[dict]:
+        r = await self._call("GET", f"/apis/batch/v1/namespaces/{namespace}/jobs", params={"labelSelector": selector})
+        if r.status_code >= 300:
+            raise KubeError(f"list jobs: {r.status_code}")
+        return r.json().get("items") or []
+
+    async def annotate_job(self, namespace: str, name: str, annotations: dict[str, str]) -> None:
+        """Set annotations of the Job (a merge patch of metadata.annotations, and nothing else)."""
+        r = await self._call(
+            "PATCH",
+            f"/apis/batch/v1/namespaces/{namespace}/jobs/{name}",
+            content=json.dumps({"metadata": {"annotations": annotations}}).encode(),
+            headers_extra={"Content-Type": "application/merge-patch+json"},
+        )
+        if r.status_code >= 300:
+            raise KubeError(f"patch job: {r.status_code} {r.text[:300]}")
+
+    async def job_log(self, namespace: str, job_name: str, container: str) -> tuple[str, bool] | None:
+        """The log of the newest pod of the Job, and whether that pod has ended. None when the Job has no pod."""
         r = await self._call(
             "GET",
             f"/api/v1/namespaces/{namespace}/pods",
@@ -93,14 +114,17 @@ class Kube:
             raise KubeError(f"list pods: {r.status_code}")
         pods = r.json().get("items", [])
         if not pods:
-            return ""
+            return None
         pods.sort(key=lambda p: (p.get("metadata") or {}).get("creationTimestamp") or "")
-        pod = pods[-1]["metadata"]["name"]
+        pod = pods[-1]
+        ended = (pod.get("status") or {}).get("phase") in ENDED_PHASES
         r = await self._call(
             "GET",
-            f"/api/v1/namespaces/{namespace}/pods/{pod}/log",
+            f"/api/v1/namespaces/{namespace}/pods/{pod['metadata']['name']}/log",
             params={"container": container, "limitBytes": LOG_LIMIT_BYTES},
         )
+        if r.status_code == 404:  # deleted after the list
+            return None
         if r.status_code >= 300:
             raise KubeError(f"pod log: {r.status_code}")
-        return r.text
+        return r.text, ended

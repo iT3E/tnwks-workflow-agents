@@ -10,11 +10,21 @@ The Job name comes from the key, so a second call with the same key makes no
 second Job: it gets the same run, and its answer when the run ends. The caller
 sets the agent name, the input and the key, and nothing else of the Job.
 
+The answer of a run is the result line in the log of its pod. A cluster can
+delete the pod of an ended Job long before the Job (the pod GC), so the
+receiver keeps the result in the annotation workflow-agents/result of the Job
+when it first reads it: on a call, and in a loop over the ended Jobs that have
+no result yet. A later call reads the annotation. When the pod went before
+the receiver read it, the answer is the state of the Job, with
+"output_kept": false.
+
 Environment:
     RUN_RECEIVER_TOKEN            the token of the callers, at least 32 characters
     RUN_RECEIVER_CONFIG           the list of agents. Default /etc/run-receiver/agents.yaml
     RUN_RECEIVER_MAX_INPUT_BYTES  the largest input, as JSON. Default 262144
     RUN_RECEIVER_POLL_SECONDS     the wait between two reads of a Job. Default 2
+    RUN_RECEIVER_RECORD_SECONDS   the wait between two rounds of the loop that keeps
+                                  the results of ended Jobs. Default 10; 0 turns it off
     POD_NAMESPACE                 the namespace of the receiver and its Jobs
 """
 
@@ -27,6 +37,7 @@ import os
 import re
 import sys
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -42,6 +53,13 @@ KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 HTTP_OF = {result.SUCCEEDED: 200, result.RUNNING: 202, result.FAILED: 502, result.TIMED_OUT: 504}
 WAIT_MARGIN_SECONDS = 60
 MIN_TOKEN_LENGTH = 32
+AGENT_LABEL = "workflow-agents/agent"
+RESULT_ANNOTATION = "workflow-agents/result"
+# The kept result is at most 64 KiB: the annotations of an object have 256 KiB
+# in all. A larger result is kept without its output.
+RESULT_MAX_BYTES = 65536
+# The kept result of a run whose pod went before the receiver read its log.
+GONE = {"output_kept": False}
 
 
 def job_name(key: str) -> str:
@@ -76,6 +94,7 @@ class Receiver:
         namespace: str,
         max_input_bytes: int = 262144,
         poll_seconds: float = 2.0,
+        record_seconds: float = 10.0,
     ):
         if len(token) < MIN_TOKEN_LENGTH:
             raise config.ConfigError(f"the token must have at least {MIN_TOKEN_LENGTH} characters")
@@ -85,29 +104,97 @@ class Receiver:
         self.namespace = namespace
         self.max_input_bytes = max_input_bytes
         self.poll_seconds = poll_seconds
+        self.record_seconds = record_seconds
+        self._record_error = ""
 
     def authorized(self, request: Request) -> bool:
         return hmac.compare_digest(request.headers.get("authorization", "").encode(), self._auth)
 
+    async def keep(self, name: str, found: dict) -> None:
+        """Keep the result in the annotation of the Job. A failure is a log line: the answer goes on."""
+        text = canonical(found)
+        if len(text.encode()) > RESULT_MAX_BYTES:
+            text = canonical({k: v for k, v in found.items() if k != "output"} | GONE)
+        try:
+            await self.kube.annotate_job(self.namespace, name, {RESULT_ANNOTATION: text})
+        except KubeError as e:
+            log.warning("run %s: the result is not kept: %s", name, e)
+
+    async def result_of(self, job: dict) -> dict:
+        """The result of an ended run: the kept one, or the one in the log of its pod (and then kept)."""
+        meta = job.get("metadata") or {}
+        kept = (meta.get("annotations") or {}).get(RESULT_ANNOTATION)
+        if kept is not None:
+            try:
+                value = json.loads(kept)
+            except ValueError:
+                value = None
+            if isinstance(value, dict):
+                return value
+        name = meta["name"]
+        got = await self.kube.job_log(self.namespace, name, config.CONTAINER)
+        if got is None:
+            found = dict(GONE)
+        else:
+            text, pod_ended = got
+            found = result.find(text) or {}
+            if not pod_ended:  # the pod still stops: its log is not the last one
+                return found
+        await self.keep(name, found)
+        return found
+
     async def outcome(self, job: dict, key: str) -> tuple[int, dict]:
         name = job["metadata"]["name"]
-        agent = ((job.get("metadata") or {}).get("labels") or {}).get("workflow-agents/agent", "")
+        agent = ((job.get("metadata") or {}).get("labels") or {}).get(AGENT_LABEL, "")
         body = {"key": key, "agent": agent, "job": name}
         state = job_state(job)
         if state == result.RUNNING:
             return 202, body | {"status": result.RUNNING}
-        found = result.find(await self.kube.job_log(self.namespace, name, config.CONTAINER)) or {}
-        status = state if state == result.TIMED_OUT else found.get("status", result.FAILED)
-        if status not in HTTP_OF or status == result.RUNNING:
-            status = result.FAILED
+        found = await self.result_of(job)
+        gone = "status" not in found and found.get("output_kept") is False
+        if gone:  # the state of the Job is all that is left
+            status = state
+        else:
+            status = state if state == result.TIMED_OUT else found.get("status", result.FAILED)
+            if status not in HTTP_OF or status == result.RUNNING:
+                status = result.FAILED
         body["status"] = status
+        if found.get("output_kept") is False:
+            body["output_kept"] = False
         if status == result.SUCCEEDED:
-            body["output"] = found.get("output")
+            if not gone and "output_kept" not in body:
+                body["output"] = found.get("output")
+        elif gone:
+            body["error"] = "the result of the run is no longer kept: its pod is gone"
         else:
             body["error"] = found.get("error") or (
                 "the run reached its time limit" if status == result.TIMED_OUT else "the run job gave no result"
             )
         return HTTP_OF[status], body
+
+    async def keep_ended(self) -> int:
+        """One round of the loop: keep the result of each ended run Job that has none yet."""
+        count = 0
+        for job in await self.kube.list_jobs(self.namespace, AGENT_LABEL):
+            meta = job.get("metadata") or {}
+            if not str(meta.get("name", "")).startswith("run-") or job_state(job) == result.RUNNING:
+                continue
+            if RESULT_ANNOTATION in (meta.get("annotations") or {}):
+                continue
+            await self.result_of(job)
+            count += 1
+        return count
+
+    async def keep_loop(self) -> None:
+        while True:
+            try:
+                await self.keep_ended()
+                self._record_error = ""
+            except KubeError as e:
+                if str(e) != self._record_error:  # one line for each new error, not one each round
+                    log.warning("the loop that keeps the results: %s", e)
+                self._record_error = str(e)
+            await asyncio.sleep(self.record_seconds)
 
     async def wait(self, name: str, until: float) -> dict | None:
         while True:
@@ -183,7 +270,16 @@ class Receiver:
 
 
 def create_app(receiver: Receiver) -> FastAPI:
-    app = FastAPI(title="run receiver", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(receiver.keep_loop()) if receiver.record_seconds > 0 else None
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+
+    app = FastAPI(title="run receiver", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
     async def guarded(request: Request, call) -> JSONResponse:
         if not receiver.authorized(request):
@@ -221,6 +317,7 @@ def main() -> int:
             own_namespace(),
             max_input_bytes=int(os.environ.get("RUN_RECEIVER_MAX_INPUT_BYTES", "262144")),
             poll_seconds=float(os.environ.get("RUN_RECEIVER_POLL_SECONDS", "2")),
+            record_seconds=float(os.environ.get("RUN_RECEIVER_RECORD_SECONDS", "10")),
         )
     except (OSError, config.ConfigError, KubeError) as e:
         print(f"run-receiver: {e}", file=sys.stderr)

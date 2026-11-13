@@ -185,7 +185,7 @@ def receiver(image: str, agents_file: str, token: str) -> list:
         "kind": "Role",
         "metadata": {"name": "run-receiver", "namespace": ns},
         "rules": [
-            {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get"]},
+            {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "list", "patch"]},
             {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
             {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
         ],

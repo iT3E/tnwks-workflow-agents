@@ -45,7 +45,7 @@ Any other field gets `400`. The caller sets nothing of the Job but these.
 
 | Status | Body | When |
 | --- | --- | --- |
-| `200` | `{"key", "agent", "job", "created", "status": "succeeded", "output": {...}}` | The run ended, and the agent answered. `output` is the `output` of the contract |
+| `200` | `{"key", "agent", "job", "created", "status": "succeeded", "output": {...}}` | The run ended, and the agent answered. `output` is the `output` of the contract. `"output_kept": false` in place of `output` when the output is no longer kept (below) |
 | `202` | `{"key", "agent", "job", "created", "status": "running"}` | `wait` is `false`, or the run did not end in its time limit plus 60 s |
 | `400` | `{"error"}` | The body is not valid |
 | `401` | `{"error"}` | No token, or a wrong one |
@@ -62,6 +62,26 @@ run: `202` while it runs, and the same answer when it ended. With a different
 agent or input it gets `409`. The Job, and so the key, stays until
 `ttlSecondsAfterFinished` of the template (7 days in the example); after that
 the same key makes a new run.
+
+**The answer stays with the Job, not with its pod.** The answer of a run is
+the result line in the log of its pod, and a cluster can delete the pod of an
+ended Job long before the Job (the pod GC, `terminated-pod-gc-threshold`).
+So the receiver keeps the result in the annotation `workflow-agents/result`
+of the Job when it first reads it: on a call, and in a loop over the ended
+Jobs with no kept result yet (every `RUN_RECEIVER_RECORD_SECONDS`). A later
+call reads the annotation.
+
+- A result of more than 64 KiB (as compact JSON) is kept without its
+  `output`: a later call gets the `status`, and `"output_kept": false` in
+  place of `output`. The call that read the log first gets the whole output.
+- When the pod went before the receiver read its log (the receiver was down
+  for that time), the answer is the state of the Job: `succeeded` (`200`),
+  `failed` (`502`) or `timed_out` (`504`), with `"output_kept": false` and
+  no `output`. A failed run says so in `error`. The Job state is true: the
+  run job ends with exit code 0 only when the agent answered.
+- A kept result changes only an annotation of the Job (a merge patch of
+  `metadata.annotations`). If the patch fails, the call still answers from
+  the log, and the receiver logs one line.
 
 ### `GET /runs/{key}`
 
@@ -86,7 +106,7 @@ The state of the run of that key, with the same bodies and codes as `POST`
 | Command (`args`) | Part | Kubernetes rights of its service account |
 | --- | --- | --- |
 | `serve` (or none) | A workflow agent, for the agent of `AGENT_NAME` | None. In a sandbox it has no service account token |
-| `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`; `pods`: `list`; `pods/log`: `get` |
+| `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`, `list`, `patch` (the annotation of the kept result only); `pods`: `list`; `pods/log`: `get` |
 | `run-job` | The run job, a Job from the template | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate only |
 | `sweep [--dry-run]` | The time limit of the sandboxes, a CronJob | None, as the run job |
 
@@ -147,6 +167,7 @@ labels `workflow-run=true` and `workflow-agent=<name>`, and the name
 | `RUN_RECEIVER_CONFIG` | The list of agents. Default `/etc/run-receiver/agents.yaml` |
 | `POD_NAMESPACE` | Its namespace, from the downward API. Each Job goes there |
 | `RUN_RECEIVER_MAX_INPUT_BYTES`, `RUN_RECEIVER_POLL_SECONDS` | Optional: 262144, and 2 |
+| `RUN_RECEIVER_RECORD_SECONDS` | Optional: the wait between two rounds of the loop that keeps the results of ended Jobs. Default 10; `0` turns the loop off |
 
 ### Environment of `sweep`
 
@@ -215,7 +236,7 @@ trace collector, the Kubernetes API and the OpenShell CLI are fakes in
 | --- | --- |
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
-| `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes |
+| `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes, and the kept result when the pod is gone |
 | `test_run_job.py` | The whole run with a fake CLI, the delete on each failure and on SIGTERM, and the sweep |
 | `kind/test_on_kind.py` | CI only, on the host of the job: the whole run on a kind cluster (below) |
 
@@ -235,7 +256,7 @@ at `litellm-app.ai`, the trace collector at `alloy.monitoring`, and GitHub in
 1. A run through `POST /runs` answers `200` with the review, the model and
    GitHub got the test credentials from the providers (the sandbox has only a
    placeholder), the spans got to the collector, and no sandbox is left. The
-   same key gets the same run.
+   same key gets the same run, also after the pod of the run is deleted.
 2. A second key for the same head is skipped: one comment for one head.
 3. A run job that gets SIGTERM in the middle of a run deletes its sandbox,
    and the sweep (`--dry-run`) finds the sandbox by its label first.
