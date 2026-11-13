@@ -81,11 +81,12 @@ for f in /profiles/*.yaml; do
     continue
   fi
   meta="$(osh profile export "$id" -o json | stored_meta)" || fail profile-export "$id"
-  if [ "${meta%% *}" = "$sum" ]; then
+  # No brace expansions in this file: Flux substitutes them in the ConfigMap.
+  if [ "$(echo "$meta" | cut -d' ' -f1)" = "$sum" ]; then
     echo "profile $id: unchanged"
     continue
   fi
-  profile_file "$f" "$sum" "${meta#* }" "$out"
+  profile_file "$f" "$sum" "$(echo "$meta" | cut -d' ' -f2)" "$out"
   osh profile update -f "$out" "$id" >/dev/null || fail profile-update "$id"
   echo "profile $id: updated"
 done
