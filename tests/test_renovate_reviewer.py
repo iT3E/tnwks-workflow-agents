@@ -19,7 +19,7 @@ from agents import renovate_reviewer
 from agents.renovate_reviewer import agent as reviewer
 from agents.renovate_reviewer.github import PullRequest
 from agents.renovate_reviewer.tools import READ_ONLY_TOOLS
-from contract import InputError
+from contract import ConfigError, InputError
 
 ALLOWED_PATHS = [
     ("GET", rf"^/repos/{fake_github.REPO}/pulls/{fake_github.NUMBER}(\?.*)?$"),
@@ -63,12 +63,34 @@ class Review(unittest.TestCase):
 
     def test_the_model_gets_read_tools_only_and_the_key_of_the_gateway(self):
         run(self.case, self.case.good_input())
+        self.assertTrue(self.model.requests)
         for r, body in zip(self.model.requests, self.model_requests()):
-            self.assertEqual(
-                r["headers"].get("Authorization") or r["headers"].get("authorization"), f"Bearer {mock_model.KEY}"
-            )
-            names = sorted(t["function"]["name"] for t in body.get("tools", []))
+            headers = {k.lower(): v for k, v in r["headers"].items()}
+            self.assertEqual(headers.get("authorization"), f"Bearer {mock_model.KEY}")
+            self.assertNotIn("x-api-key", headers)
+            names = sorted(t["name"] for t in body.get("tools", []))
             self.assertEqual(names, sorted(READ_ONLY_TOOLS))
+
+    def test_each_model_call_is_a_messages_call_with_the_name_and_the_effort(self):
+        run(self.case, self.case.good_input())
+        self.assertTrue(self.model.requests)
+        for r, body in zip(self.model.requests, self.model_requests()):
+            self.assertEqual((r["method"], r["path"]), ("POST", mock_model.PATH))
+            self.assertEqual(body["model"], "mock-model")
+            self.assertEqual(body["max_tokens"], 8192)
+            self.assertEqual(body["output_config"], {"effort": "high"})
+            self.assertTrue(body.get("system"))
+
+    def test_the_history_only_grows_between_model_calls(self):
+        # The model bridge matches a call to its live conversation by the
+        # history: each call starts with the messages of the call before it.
+        run(self.case, self.case.good_input())
+        bodies = self.model_requests()
+        self.assertGreater(len(bodies), 2)
+        for before, after in zip(bodies, bodies[1:]):
+            self.assertEqual(after["system"], before["system"])
+            self.assertEqual(after["messages"][: len(before["messages"])], before["messages"])
+            self.assertGreater(len(after["messages"]), len(before["messages"]))
         for name in READ_ONLY_TOOLS:
             self.assertNotRegex(name, r"merge|approve|push|label|comment_on|write|post")
 
@@ -154,3 +176,38 @@ class Parts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Config(unittest.TestCase):
+    BASE = {
+        "MODEL_GATEWAY_URL": "http://gateway.example:4000",
+        "MODEL_GATEWAY_KEY": "k",
+        "GITHUB_TOKEN": "t",
+        "REVIEWER_REPOSITORIES": "example-org/example-gitops",
+    }
+
+    def model(self, **env):
+        with mock.patch.dict(os.environ, dict(self.BASE, **env), clear=True):
+            reviewer.check_config()
+            return reviewer.make_model()
+
+    def test_the_defaults(self):
+        m = self.model()
+        self.assertEqual(m.config["model_id"], "agents-workflows")
+        self.assertEqual(m.config["max_tokens"], 8192)
+        self.assertEqual(m.config["params"], {"output_config": {"effort": "high"}})
+        self.assertEqual(str(m.client.base_url).rstrip("/"), "http://gateway.example:4000")
+
+    def test_the_effort_and_the_name_are_settings(self):
+        m = self.model(REVIEW_EFFORT="Medium", MODEL_ID="agents-other", MODEL_MAX_TOKENS="2048")
+        self.assertEqual(m.config["params"], {"output_config": {"effort": "medium"}})
+        self.assertEqual(m.config["model_id"], "agents-other")
+        self.assertEqual(m.config["max_tokens"], 2048)
+
+    def test_an_effort_that_is_not_known_is_refused(self):
+        with self.assertRaises(ConfigError):
+            self.model(REVIEW_EFFORT="extreme")
+
+    def test_a_gateway_url_with_v1_works_too(self):
+        self.assertEqual(reviewer.gateway_root("http://g:4000/v1/"), "http://g:4000")
+        self.assertEqual(reviewer.gateway_root("http://g:4000"), "http://g:4000")

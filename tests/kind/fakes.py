@@ -15,6 +15,7 @@ tests/kind/manifests.py mounts this file and tests/support from a ConfigMap.
 - collector: keeps each OTLP body.
 """
 
+import json
 import sys
 import time
 
@@ -87,7 +88,15 @@ def summary(request: dict, secret: str) -> dict:
         "auth": auth_kind(headers.get("authorization", ""), secret),
         "bytes": len(body),
         "slow": f"pull request #{SLOW_NUMBER} ".encode() in body,
+        "effort": effort_of(body),
     }
+
+
+def effort_of(body: bytes):
+    try:
+        return ((json.loads(body) or {}).get("output_config") or {}).get("effort")
+    except (ValueError, AttributeError):
+        return None
 
 
 def main() -> int:

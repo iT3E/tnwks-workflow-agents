@@ -1,17 +1,18 @@
-"""A model server that speaks the OpenAI Chat Completions API and answers from a script.
+"""A model server that speaks the Anthropic Messages API and answers from a script.
 
 The script is a list of steps. Each request gets the step that matches the
 number of tool results in its messages: step 0 before any tool result, step 1
 after one, and so on. A step is ("tool", name, arguments) or ("text", text).
 Each request is kept, so a test can read the key, the tools and the messages.
+It answers POST /v1/messages only, as a stream or as one message.
 """
 
 import json
-import time
 
 from . import Server
 
 KEY = "test-model-key-not-a-secret"
+PATH = "/v1/messages"
 
 
 def reviewer_script(final_text: str, diff_path: str) -> list:
@@ -26,59 +27,62 @@ def reviewer_script(final_text: str, diff_path: str) -> list:
 
 
 def tool_results(body: dict) -> int:
-    return sum(1 for m in body.get("messages", []) if m.get("role") == "tool")
+    count = 0
+    for m in body.get("messages", []):
+        if m.get("role") == "user" and isinstance(m.get("content"), list):
+            count += sum(1 for block in m["content"] if block.get("type") == "tool_result")
+    return count
 
 
 def make_app(script: list):
     def app(handler, method, path, raw):
-        if method != "POST" or not path.rstrip("/").endswith("chat/completions"):
-            return 404, {"error": {"message": "mock: unknown path"}}, None
+        if method != "POST" or path.split("?", 1)[0].rstrip("/") != PATH:
+            return 404, {"type": "error", "error": {"type": "not_found_error", "message": "mock: unknown path"}}, None
         body = json.loads(raw or b"{}")
-        step = script[min(tool_results(body), len(script) - 1)]
-        usage = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
-        base = {"id": "chatcmpl-mock", "created": int(time.time()), "model": body.get("model", "mock")}
+        n = tool_results(body)
+        step = script[min(n, len(script) - 1)]
         if step[0] == "tool":
-            call = {
-                "id": f"call_{tool_results(body)}",
-                "type": "function",
-                "function": {"name": step[1], "arguments": json.dumps(step[2])},
-            }
-            message, finish = {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
+            block = {"type": "tool_use", "id": f"toolu_mock_{n}", "name": step[1], "input": step[2]}
+            stop = "tool_use"
         else:
-            message, finish = {"role": "assistant", "content": step[1]}, "stop"
+            block = {"type": "text", "text": step[1]}
+            stop = "end_turn"
+        message = {
+            "id": f"msg_mock_{n}",
+            "type": "message",
+            "role": "assistant",
+            "model": body.get("model", "mock"),
+            "content": [block],
+            "stop_reason": stop,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        }
         if not body.get("stream"):
-            return (
-                200,
-                dict(
-                    base,
-                    object="chat.completion",
-                    usage=usage,
-                    choices=[{"index": 0, "message": message, "finish_reason": finish}],
-                ),
-                None,
-            )
+            return 200, message, None
+
         handler.send_response(200)
         handler.send_header("content-type", "text/event-stream")
         handler.send_header("connection", "close")
         handler.end_headers()
-        chunk = dict(base, object="chat.completion.chunk")
 
-        def send(data):
-            handler.wfile.write(f"data: {data if isinstance(data, str) else json.dumps(data)}\n\n".encode())
+        def send(event: str, data: dict):
+            handler.wfile.write(f"event: {event}\ndata: {json.dumps(dict(data, type=event))}\n\n".encode())
             handler.wfile.flush()
 
-        send(dict(chunk, choices=[{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]))
+        start = dict(message, content=[], stop_reason=None, usage={"input_tokens": 100, "output_tokens": 1})
+        send("message_start", {"message": start})
         if step[0] == "tool":
+            send("content_block_start", {"index": 0, "content_block": dict(block, input={})})
             send(
-                dict(
-                    chunk, choices=[{"index": 0, "delta": {"tool_calls": [dict(call, index=0)]}, "finish_reason": None}]
-                )
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(step[2])}},
             )
         else:
-            send(dict(chunk, choices=[{"index": 0, "delta": {"content": step[1]}, "finish_reason": None}]))
-        send(dict(chunk, choices=[{"index": 0, "delta": {}, "finish_reason": finish}]))
-        send(dict(chunk, choices=[], usage=usage))
-        send("[DONE]")
+            send("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}})
+            send("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": step[1]}})
+        send("content_block_stop", {"index": 0})
+        send("message_delta", {"delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 10}})
+        send("message_stop", {})
         handler.close_connection = True
         return 200, None, None
 

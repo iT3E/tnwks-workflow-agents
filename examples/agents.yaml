@@ -46,8 +46,9 @@ agents:
                   - {name: SANDBOX_MEMORY, value: 512Mi}
                   - {name: OPENSHELL_GATEWAY_URL, value: "https://openshell.agents-workflows.svc.cluster.local:8080"}  # the sandbox gateway of the trust domain
                   - {name: RUN_TIMEOUT_SECONDS, value: "1800"}
-                  - {name: AGENT_ENV_MODEL_GATEWAY_URL, value: "http://litellm-app.ai.svc.cluster.local:4000/v1"}
-                  - {name: AGENT_ENV_MODEL_ID, value: review-model}
+                  - {name: AGENT_ENV_MODEL_GATEWAY_URL, value: "http://litellm-app.ai.svc.cluster.local:4000"}  # the root: the agent calls POST /v1/messages
+                  - {name: AGENT_ENV_MODEL_ID, value: agents-workflows}  # the name of the trust domain at the model gateway
+                  - {name: AGENT_ENV_REVIEW_EFFORT, value: high}
                   - {name: AGENT_ENV_REVIEWER_REPOSITORIES, value: "example-org/example-gitops"}
                   - {name: AGENT_ENV_OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://alloy.monitoring.svc.cluster.local:4318"}
                 securityContext:

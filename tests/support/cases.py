@@ -32,7 +32,7 @@ class RenovateReviewerCase:
     def env(self) -> dict[str, str]:
         return {
             "AGENT_NAME": self.name,
-            "MODEL_GATEWAY_URL": f"{self.model.url}/v1",
+            "MODEL_GATEWAY_URL": self.model.url,
             "MODEL_GATEWAY_KEY": mock_model.KEY,
             "MODEL_ID": "mock-model",
             "GITHUB_TOKEN": fake_github.TOKEN,
