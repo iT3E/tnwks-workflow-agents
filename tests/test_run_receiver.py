@@ -36,6 +36,8 @@ def result_log(**fields) -> str:
 
 
 class ReceiverTest(unittest.TestCase):
+    record_seconds = 0.0  # the loop that keeps results: off, but in KeptResult
+
     def setUp(self):
         self.kube = fake_kube.FakeKube().__enter__()
         self.tmp = tempfile.TemporaryDirectory()
@@ -44,7 +46,12 @@ class ReceiverTest(unittest.TestCase):
             f.write(fake_kube.TOKEN)
         self.templates = config.load(EXAMPLE)
         receiver = receiver_app.Receiver(
-            TOKEN, self.templates, Kube(self.kube.url, token_file, "/no/ca.crt"), NAMESPACE, poll_seconds=0.05
+            TOKEN,
+            self.templates,
+            Kube(self.kube.url, token_file, "/no/ca.crt"),
+            NAMESPACE,
+            poll_seconds=0.05,
+            record_seconds=self.record_seconds,
         )
         self.app = Asgi(receiver_app.create_app(receiver)).__enter__()
         self.http = httpx.Client(base_url=self.app.url, timeout=30, headers={"authorization": f"Bearer {TOKEN}"})
@@ -251,6 +258,138 @@ class OneRunForOneKey(ReceiverTest):
     def test_a_cluster_api_error_is_a_503(self):
         self.kube.fail_with = 500
         self.assertEqual(self.post(key="key-8", wait=False).status_code, 503)
+
+
+def wait_until(what, check, timeout=10):
+    deadline = time.monotonic() + timeout
+    while not check():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"no {what} in {timeout} s")
+        time.sleep(0.05)
+
+
+class KeptResult(ReceiverTest):
+    """The pod of an ended Job goes long before the Job (the pod GC): the answer stays."""
+
+    record_seconds = 0.05
+    OUTPUT = {"status": "skipped", "reason": "the pull request is closed"}
+
+    def kept(self, key):
+        return self.kube.annotations(receiver_app.job_name(key)).get(receiver_app.RESULT_ANNOTATION)
+
+    def test_the_answer_stays_when_the_pod_of_the_run_is_gone(self):
+        key = "kept-1"
+        self.finish_soon(key, log=result_log(status="succeeded", output=self.OUTPUT))
+        first = self.post(key=key)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["output"], self.OUTPUT)
+        self.assertEqual(json.loads(self.kept(key))["output"], self.OUTPUT)
+        self.kube.gc_pod(receiver_app.job_name(key))
+        for r in (self.post(key=key), self.http.get(f"/runs/{key}")):
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["status"], "succeeded")
+            self.assertEqual(r.json()["output"], self.OUTPUT)
+            self.assertNotIn("output_kept", r.json())
+
+    def test_the_loop_keeps_the_result_of_a_run_that_nobody_waits_for(self):
+        key = "kept-2"
+        self.assertEqual(self.post(key=key, wait=False).status_code, 202)
+        self.kube.finish(receiver_app.job_name(key), log=result_log(status="succeeded", output=self.OUTPUT))
+        wait_until("kept result", lambda: self.kept(key))
+        self.kube.gc_pod(receiver_app.job_name(key))
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual((r.status_code, r.json()["output"]), (200, self.OUTPUT), r.text)
+
+    def test_the_loop_keeps_a_failure_and_reads_each_job_once(self):
+        key = "kept-3"
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        self.kube.finish(name, "Failed", "BackoffLimitExceeded", result_log(status="failed", error="no answer"))
+        wait_until("kept result", lambda: self.kept(key))
+        time.sleep(0.3)  # more rounds of the loop
+        self.assertEqual(len(self.kube.patches()), 1)
+        self.kube.gc_pod(name)
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual((r.status_code, r.json()["error"]), (502, "no answer"), r.text)
+
+    def test_the_loop_leaves_a_running_job(self):
+        self.post(key="kept-4", wait=False)
+        time.sleep(0.3)
+        self.assertEqual(self.kube.patches(), [])
+
+    def test_a_result_that_is_too_large_is_kept_without_its_output(self):
+        key = "kept-5"
+        big = {"status": "reviewed", "text": "x" * (receiver_app.RESULT_MAX_BYTES + 10)}
+        self.finish_soon(key, log=result_log(status="succeeded", output=big, seconds=12.5))
+        first = self.post(key=key)
+        self.assertEqual(first.json()["output"], big)
+        kept = json.loads(self.kept(key))
+        self.assertEqual(kept, {"status": "succeeded", "seconds": 12.5, "output_kept": False})
+        self.kube.gc_pod(receiver_app.job_name(key))
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["status"], "succeeded")
+        self.assertIs(r.json()["output_kept"], False)
+        self.assertNotIn("output", r.json())
+
+
+class ResultGone(ReceiverTest):
+    """The pod went before the receiver read its log: the answer is the state of the Job."""
+
+    def gone(self, key, condition, reason=""):
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        self.kube.finish(name, condition, reason, log="")
+        self.kube.gc_pod(name)
+        return self.http.get(f"/runs/{key}"), name
+
+    def test_a_complete_job_is_a_success_with_no_output(self):
+        r, name = self.gone("gone-1", "Complete")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["status"], "succeeded")
+        self.assertIs(r.json()["output_kept"], False)
+        self.assertNotIn("output", r.json())
+        self.assertNotIn("error", r.json())
+        # Kept as gone, so a later call gives the same answer with no pod lookup.
+        self.assertEqual(
+            json.loads(self.kube.annotations(name)[receiver_app.RESULT_ANNOTATION]), {"output_kept": False}
+        )
+        before = len([q for q in self.kube.server.requests if "/pods" in q["path"]])
+        again = self.post(key="gone-1")
+        self.assertEqual(again.json() | {"created": None}, r.json() | {"created": None})
+        self.assertEqual(len([q for q in self.kube.server.requests if "/pods" in q["path"]]), before)
+
+    def test_a_failed_job_is_a_failure_that_says_the_result_is_gone(self):
+        r, _ = self.gone("gone-2", "Failed", "BackoffLimitExceeded")
+        self.assertEqual(r.status_code, 502, r.text)
+        self.assertEqual(r.json()["status"], "failed")
+        self.assertIs(r.json()["output_kept"], False)
+        self.assertIn("no longer kept", r.json()["error"])
+
+    def test_a_job_at_its_time_limit_is_timed_out(self):
+        r, _ = self.gone("gone-3", "Failed", "DeadlineExceeded")
+        self.assertEqual((r.status_code, r.json()["status"]), (504, "timed_out"), r.text)
+        self.assertIs(r.json()["output_kept"], False)
+
+
+class KeepFails(ReceiverTest):
+    def test_a_refused_patch_still_answers_from_the_log(self):
+        self.kube.refuse_patch = 422
+        key = "refused-1"
+        self.finish_soon(key, log=result_log(status="succeeded", output={"status": "reviewed"}))
+        r = self.post(key=key)
+        self.assertEqual((r.status_code, r.json()["output"]), (200, {"status": "reviewed"}), r.text)
+        self.assertEqual(len(self.kube.patches()), 1)
+        self.assertNotIn(receiver_app.RESULT_ANNOTATION, self.kube.annotations(receiver_app.job_name(key)))
+
+    def test_the_log_of_a_pod_that_still_stops_is_not_kept(self):
+        self.kube.pod_phase = "Running"
+        key = "stopping-1"
+        self.post(key=key, wait=False)
+        self.kube.finish(receiver_app.job_name(key), "Failed", "DeadlineExceeded", log="INFO still stopping\n")
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual((r.status_code, r.json()["error"]), (504, "the run reached its time limit"), r.text)
+        self.assertEqual(self.kube.patches(), [])
 
 
 if __name__ == "__main__":

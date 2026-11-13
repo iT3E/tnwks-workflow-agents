@@ -199,6 +199,20 @@ class RunJobOnKind(unittest.TestCase):
         code, state = http("GET", f"{RECEIVER_URL}/runs/{key}", self.token)
         self.assertEqual((code, state["status"]), (200, "succeeded"))
 
+        # The pod GC of a cluster deletes the pod of an ended Job long before
+        # the Job: the receiver kept the result in an annotation of the Job,
+        # through the API server, and the answer stays.
+        job = body["job"]
+        annotations = json.loads(kx("-n", WORKFLOWS_NS, "get", "job", job, "-o", "json").stdout)["metadata"][
+            "annotations"
+        ]
+        self.assertEqual(json.loads(annotations["workflow-agents/result"])["output"], body["output"])
+        kx("-n", WORKFLOWS_NS, "delete", "pod", "-l", f"batch.kubernetes.io/job-name={job}", "--wait=true")
+        code, again = self.post_run(key, self.input)
+        self.assertEqual((code, again["output"]), (200, body["output"]), again)
+        code, state = http("GET", f"{RECEIVER_URL}/runs/{key}", self.token)
+        self.assertEqual((code, state.get("output")), (200, body["output"]), state)
+
     def test_2_a_second_run_for_the_same_head_is_skipped(self):
         code, body = self.post_run(f"kind-again-{uuid.uuid4().hex[:8]}", self.input)
         self.assertEqual(code, 200, body)

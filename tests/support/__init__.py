@@ -72,6 +72,9 @@ class JsonHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._handle("DELETE")
 
+    def do_PATCH(self):
+        self._handle("PATCH")
+
 
 class Server:
     """An HTTP server in a thread, on a free port of 127.0.0.1."""
