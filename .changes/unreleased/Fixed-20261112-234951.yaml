@@ -1,3 +1,0 @@
-kind: Fixed
-body: 'run receiver: the answer of an ended run stays when the cluster deletes its pod. The receiver keeps the result in the annotation workflow-agents/result of the Job (on the first read, and in a loop over ended Jobs), and answers the Job state with "output_kept": false when the pod went first. The Role needs jobs list and patch'
-time: 2026-11-12T23:49:51.158578276-08:00

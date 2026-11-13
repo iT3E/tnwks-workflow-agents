@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.1.2 - 2026-11-13
+
+### Fixed
+
+* run receiver: the answer of an ended run stays when the cluster deletes its pod. The receiver keeps the result in the annotation workflow-agents/result of the Job (on the first read, and in a loop over ended Jobs), and answers the Job state with "output_kept": false when the pod went first. The Role needs jobs list and patch
+
 ## v0.1.1 - 2026-11-13
 
 ### Fixed
