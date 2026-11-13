@@ -103,9 +103,10 @@ The `renovate-reviewer` agent adds:
 
 | Variable | What it holds |
 | --- | --- |
-| `MODEL_GATEWAY_URL` | The OpenAI-compatible base URL of the model gateway, with `/v1` |
-| `MODEL_GATEWAY_KEY` | The key of the model gateway. In a sandbox the provider sets a placeholder, and the supervisor puts the key in the `Authorization: Bearer` header outside the sandbox |
-| `MODEL_ID` | The model name at the gateway |
+| `MODEL_GATEWAY_URL` | The root URL of the model gateway. The agent calls its Anthropic Messages API, `POST /v1/messages` (a trailing `/v1` is removed) |
+| `MODEL_GATEWAY_KEY` | The key of the model gateway, sent as `Authorization: Bearer`. In a sandbox the provider sets a placeholder, and the supervisor puts the key in that header outside the sandbox |
+| `MODEL_ID` | Optional: the model name at the gateway, default `agents-workflows` |
+| `REVIEW_EFFORT` | Optional: the effort of each model call, sent as `output_config.effort`: `low`, `medium`, `high`, `xhigh` or `max`. Default `high`. Any other value fails the run |
 | `GITHUB_TOKEN` | The GitHub credential, from a provider, as above |
 | `GITHUB_API_URL` | Optional, default `https://api.github.com` |
 | `REVIEWER_REPOSITORIES` | The repositories it may review, comma separated. Any other gets `400` |
@@ -177,7 +178,7 @@ The sandbox holds only a placeholder.
 
 | Provider (profile) | Variable in the sandbox | Address and paths |
 | --- | --- | --- |
-| `model-gateway` (`workflow-model-gateway`) | `MODEL_GATEWAY_KEY`, as `Authorization: Bearer` | `POST /v1/chat/completions` at `litellm-app.ai.svc.cluster.local:4000` |
+| `model-gateway` (`workflow-model-gateway`) | `MODEL_GATEWAY_KEY`, as `Authorization: Bearer` | `POST /v1/messages` at `litellm-app.ai.svc.cluster.local:4000` |
 | `github-reviewer` (`workflow-github-reviewer`) | `GITHUB_TOKEN`, as `Authorization: Bearer` | `api.github.com`: `GET` on `/repos/{repo}/pulls/*`, `/pulls/*/files`, `/contents/**`, `/issues/*/comments`, `/commits/*/check-runs`, and `POST /repos/{repo}/issues/*/comments`, for one repository |
 
 The GitHub credential needs read access to pull requests, contents and
@@ -195,6 +196,13 @@ authors, the checks) and writes a review. The code posts it as one comment,
 with a verdict: `ready`, `needs-changes`, `one-way` or `blocked`. The answer
 is `{"status": "reviewed" | "skipped", "repo", "pr", "head_sha", "verdict",
 "comment_url", "reason"}`. The review is advice; the owner decides.
+
+The model is the Strands Anthropic model, on the Anthropic Messages API of
+the model gateway. Each call sends the effort (`output_config.effort`), and
+the history only grows: no turn is trimmed or summarized
+(`NullConversationManager`), so each call starts with the messages of the
+call before it. A model bridge behind the gateway matches a call to its live
+conversation that way.
 
 ## Tests
 

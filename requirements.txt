@@ -1,8 +1,8 @@
 # The packages the code imports, one release each. constraints.txt holds the
 # full frozen set (these and every package they pull in). Renovate updates
 # both files (the python preset of iT3E/github-workflows).
-strands-agents[openai,otel]==1.64.0
-openai==3.49.0
+strands-agents[anthropic,otel]==1.64.0
+anthropic==0.125.0
 opentelemetry-exporter-otlp-proto-http==1.45.2
 fastapi==0.162.4
 uvicorn==0.54.0

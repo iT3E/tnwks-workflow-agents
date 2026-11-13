@@ -89,7 +89,7 @@ class RunJobLocal(unittest.TestCase):
             OPENSHELL_BIN=str(cli),
             READY_TIMEOUT_SECONDS="30",
             RUN_TIMEOUT_SECONDS="60",
-            AGENT_ENV_MODEL_GATEWAY_URL=f"{self.case.model.url}/v1",
+            AGENT_ENV_MODEL_GATEWAY_URL=self.case.model.url,
             AGENT_ENV_MODEL_ID="mock-model",
             AGENT_ENV_GITHUB_API_URL=self.case.github.url,
             AGENT_ENV_REVIEWER_REPOSITORIES=fake_github.REPO,

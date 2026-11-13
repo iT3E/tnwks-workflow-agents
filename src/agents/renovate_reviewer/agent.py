@@ -10,9 +10,13 @@ be `head_sha`. A run that finds a review comment for the same head already
 posts no second one, so a retry of a run is safe.
 
 Environment:
-    MODEL_GATEWAY_URL      the OpenAI-compatible base URL of the model gateway (with /v1)
-    MODEL_GATEWAY_KEY      the key of the model gateway; a placeholder in a sandbox
-    MODEL_ID               the model name at the gateway
+    MODEL_GATEWAY_URL      the root URL of the model gateway; the agent calls its
+                           Anthropic Messages API, POST /v1/messages
+    MODEL_GATEWAY_KEY      the key of the model gateway, sent as Authorization: Bearer;
+                           a placeholder in a sandbox
+    MODEL_ID               the model name at the gateway, default agents-workflows
+    REVIEW_EFFORT          the effort of each model call (output_config.effort):
+                           low, medium, high, xhigh or max. Default high
     GITHUB_TOKEN           the GitHub credential; a placeholder in a sandbox
     GITHUB_API_URL         default https://api.github.com
     REVIEWER_REPOSITORIES  the repositories that the agent may review, comma separated
@@ -35,13 +39,30 @@ MARKER = "<!-- workflow-agent: renovate-reviewer head={sha} -->"
 MARKER_PATTERN = re.compile(r"<!-- workflow-agent: renovate-reviewer head=([0-9a-f]{40}) -->")
 VERDICT_PATTERN = re.compile(r"^\s*\**\s*verdict\s*\**\s*:\s*\**\s*`?([a-z-]+)`?", re.IGNORECASE | re.MULTILINE)
 FOOTER = "This review is advice from a workflow agent. It does not approve, merge or change a label. The owner decides."
-REQUIRED = ("MODEL_GATEWAY_URL", "MODEL_GATEWAY_KEY", "MODEL_ID", "GITHUB_TOKEN", "REVIEWER_REPOSITORIES")
+REQUIRED = ("MODEL_GATEWAY_URL", "MODEL_GATEWAY_KEY", "GITHUB_TOKEN", "REVIEWER_REPOSITORIES")
+DEFAULT_MODEL_ID = "agents-workflows"
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "high"
 
 
 def check_config() -> None:
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise ConfigError(f"{NAME}: missing environment variables: {', '.join(missing)}")
+    effort()
+
+
+def effort() -> str:
+    value = os.environ.get("REVIEW_EFFORT", "").strip().lower() or DEFAULT_EFFORT
+    if value not in EFFORTS:
+        raise ConfigError(f"{NAME}: REVIEW_EFFORT must be one of {', '.join(EFFORTS)}")
+    return value
+
+
+def gateway_root(url: str) -> str:
+    """The root URL of the model gateway. The SDK adds /v1/messages, so a trailing /v1 goes."""
+    url = url.strip().rstrip("/")
+    return url[: -len("/v1")] if url.endswith("/v1") else url
 
 
 def allowed_repositories() -> set[str]:
@@ -91,31 +112,52 @@ def existing_review(pr: PullRequest, sha: str) -> dict | None:
 
 
 def make_model():
-    from strands.models.openai import OpenAIModel
+    """The model of the review: the Anthropic Messages API of the model gateway.
 
-    return OpenAIModel(
-        client_args={"api_key": os.environ["MODEL_GATEWAY_KEY"], "base_url": os.environ["MODEL_GATEWAY_URL"]},
-        model_id=os.environ["MODEL_ID"],
-        params={"max_tokens": int(os.environ.get("MODEL_MAX_TOKENS", "8192"))},
+    The key goes as Authorization: Bearer (auth_token), the header where the
+    proxy of a sandbox puts the key in. The request carries the effort in
+    output_config, and the model bridge behind the gateway takes it from there.
+    """
+    from strands.models.anthropic import AnthropicModel
+
+    return AnthropicModel(
+        client_args={
+            "auth_token": os.environ["MODEL_GATEWAY_KEY"],
+            "base_url": gateway_root(os.environ["MODEL_GATEWAY_URL"]),
+        },
+        model_id=os.environ.get("MODEL_ID", "").strip() or DEFAULT_MODEL_ID,
+        max_tokens=int(os.environ.get("MODEL_MAX_TOKENS", "8192")),
+        params={"output_config": {"effort": effort()}},
     )
 
 
 async def review(pr: PullRequest, repo: str, number: int, sha: str) -> str:
     from strands import Agent
+    from strands.agent.conversation_manager import NullConversationManager
     from strands.types.agent import Limits
 
+    model = make_model()
     agent = Agent(
-        model=make_model(),
+        model=model,
+        # The history only grows: no turn is trimmed or summarized, so each
+        # model call starts with the messages of the call before it. The model
+        # bridge matches a call to its live conversation that way.
+        conversation_manager=NullConversationManager(),
         tools=make_tools(pr, sha),
         system_prompt=prompt.SYSTEM_PROMPT,
         callback_handler=None,
         name=NAME,
         trace_attributes={"workflow.agent": NAME},
     )
-    result = await agent.invoke_async(
-        prompt.task(repo, number, sha),
-        limits=Limits(turns=int(os.environ.get("REVIEWER_MAX_TURNS", "40"))),
-    )
+    try:
+        result = await agent.invoke_async(
+            prompt.task(repo, number, sha),
+            limits=Limits(turns=int(os.environ.get("REVIEWER_MAX_TURNS", "40"))),
+        )
+    finally:
+        # The connections of the model client end with the run, not later
+        # with the event loop.
+        await model.client.close()
     if str(result.stop_reason).startswith("limit_"):
         raise RuntimeError(f"the review stopped at a limit: {result.stop_reason}")
     text = str(result).strip()

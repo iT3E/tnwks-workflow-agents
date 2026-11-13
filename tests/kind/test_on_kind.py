@@ -179,6 +179,9 @@ class RunJobOnKind(unittest.TestCase):
         # test credential, which only the providers hold.
         self.assertTrue(model, "no call reached the model gateway")
         self.assertEqual({r["auth"] for r in model}, {"key"})
+        # The Messages API, with the effort of the Job template.
+        self.assertEqual({(r["method"], r["path"]) for r in model}, {("POST", "/v1/messages")})
+        self.assertEqual({r["effort"] for r in model}, {"high"})
         self.assertEqual({r["auth"] for r in github}, {"key"})
         posts = [r for r in github if r["method"] == "POST"]
         self.assertEqual(len(posts), 1, github)
