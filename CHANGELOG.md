@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.1.1 - 2026-11-13
+
+### Fixed
+
+* The Renovate reviewer calls the Anthropic Messages API of the model gateway (POST /v1/messages, the route of the agents), sends the effort of each call in output_config (REVIEW_EFFORT, default high), and keeps the history append only (NullConversationManager), so the model bridge carries the effort and matches each call to its conversation. MODEL_ID defaults to agents-workflows, and MODEL_GATEWAY_URL is the root URL of the gateway. The image drops the OpenAI package and adds the Anthropic SDK
+
 ## v0.1.0 - 2026-11-11
 
 ### Added
