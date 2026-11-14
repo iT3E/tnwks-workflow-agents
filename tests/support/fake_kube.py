@@ -23,7 +23,8 @@ class FakeKube:
         self.logs: dict[str, str] = {}
         self.fail_with: int | None = None
         self.refuse_patch: int | None = None
-        self.pod_phase = "Succeeded"
+        self.pod_phase = "Succeeded"  # the phase that finish() gives the pod
+        self.phases: dict[str, str] = {}
         self.lock = threading.Lock()
         self.server = Server(self.app)
 
@@ -52,11 +53,32 @@ class FakeKube:
             job = self.jobs[name]
             job["status"] = {"conditions": [{"type": condition, "status": "True", "reason": reason}]}
             self.logs[name] = log
+            self.phases[name] = self.pod_phase
+
+    def start_pod(self, name: str, log: str = "") -> None:
+        """The pod of the Job runs, with this log so far."""
+        with self.lock:
+            self.logs[name] = log
+            self.phases[name] = "Running"
+
+    def write(self, name: str, text: str) -> None:
+        with self.lock:
+            self.logs[name] = self.logs.get(name, "") + text
+
+    def end_pod(self, name: str, phase: str = "Succeeded") -> None:
+        with self.lock:
+            self.phases[name] = phase
+
+    def complete(self, name: str, condition: str = "Complete", reason: str = "") -> None:
+        """The Job reads as ended, and its pod stays as it is (or gone)."""
+        with self.lock:
+            self.jobs[name]["status"] = {"conditions": [{"type": condition, "status": "True", "reason": reason}]}
 
     def gc_pod(self, name: str) -> None:
         """Delete the pod of the Job and so its log, as the pod GC of the cluster does."""
         with self.lock:
             self.logs.pop(name, None)
+            self.phases.pop(name, None)
 
     def app(self, handler, method, path, raw):
         if handler.headers.get("authorization") != f"Bearer {TOKEN}":
@@ -103,13 +125,18 @@ class FakeKube:
             selector = query.get("labelSelector", [""])[0]
             job_name = selector.split("=", 1)[1] if selector.startswith("batch.kubernetes.io/job-name=") else ""
             if job_name in self.logs:
+                phase = self.phases.get(job_name, self.pod_phase)
+                state = {"running": {}} if phase == "Running" else {"terminated": {"exitCode": 0}}
                 pod = {
                     "metadata": {"name": f"{job_name}-pod", "creationTimestamp": "2026-11-11T00:00:01Z"},
-                    "status": {"phase": self.pod_phase},
+                    "status": {"phase": phase, "containerStatuses": [{"name": "run-job", "state": state}]},
                 }
                 return 200, {"items": [pod]}, None
             return 200, {"items": []}, None
         m = re.match(r"^/api/v1/namespaces/([^/]+)/pods/([^/]+)-pod/log$", p)
         if m and method == "GET":
-            return 200, self.logs.get(m.group(2), "").encode(), {"content-type": "text/plain"}
+            # With follow=true too: the log so far, and the end of the stream.
+            if m.group(2) not in self.logs:
+                return 404, {"kind": "Status", "code": 404}, None
+            return 200, self.logs[m.group(2)].encode(), {"content-type": "text/plain"}
         return 404, {"kind": "Status", "code": 404}, None

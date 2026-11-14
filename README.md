@@ -79,24 +79,33 @@ attempt number at the end of the key, for example
   head).
 
 **The answer stays with the Job, not with its pod.** The answer of a run is
-the result line in the log of its pod, and a cluster can delete the pod of an
-ended Job long before the Job (the pod GC, `terminated-pod-gc-threshold`).
-So the receiver keeps the result in the annotation `workflow-agents/result`
-of the Job when it first reads it: on a call, and in a loop over the ended
-Jobs with no kept result yet (every `RUN_RECEIVER_RECORD_SECONDS`). A later
-call reads the annotation.
+the result line in the log of its pod. A cluster can delete that pod seconds
+after it ends: the pod GC (`terminated-pod-gc-threshold`) deletes the oldest
+terminated pods of the whole cluster over the threshold, every 20 s. So the
+receiver does not wait for the end of a run to read its log:
 
+- For each running run, it follows the log of the pod as it is written
+  (`follow=true`, with its `pods/log` right). It starts on the call that
+  makes or finds the run, and from its loop (every
+  `RUN_RECEIVER_RECORD_SECONDS`) for a run that no call started, as after a
+  restart of the receiver. One follower for one run.
+- The run job writes the result line last, just before it exits, and the
+  pod GC deletes only a pod that has ended. So the line is in hand before the
+  pod can go.
+- The receiver keeps the result in the annotation `workflow-agents/result` of
+  the Job, and a later call reads the annotation.
 - A result of more than 64 KiB (as compact JSON) is kept without its
-  `output`: a later call gets the `status`, and `"output_kept": false` in
-  place of `output`. The call that read the log first gets the whole output.
-- When the pod went before the receiver read its log (the receiver was down
-  for that time), the answer is the state of the Job: `succeeded` (`200`),
-  `failed` (`502`) or `timed_out` (`504`), with `"output_kept": false` and
-  no `output`. A failed run says so in `error`. The Job state is true: the
-  run job ends with exit code 0 only when the agent answered.
+  `output`: each call gets the `status`, and `"output_kept": false` in place
+  of `output`.
+- When the receiver was down for the whole end of a run, and the pod went
+  before it came back, the answer is the state of the Job: `succeeded`
+  (`200`), `failed` (`502`) or `timed_out` (`504`), with `"output_kept":
+  false` and no `output`. A failed run says so in `error`. The Job state is
+  true: the run job ends with exit code 0 only when the agent answered and
+  its sandbox was deleted.
 - A kept result changes only an annotation of the Job (a merge patch of
-  `metadata.annotations`). If the patch fails, the call still answers from
-  the log, and the receiver logs one line.
+  `metadata.annotations`). If the patch fails, the receiver still answers
+  from what it read, and logs one line.
 
 ### `GET /runs/{key}`
 
@@ -182,7 +191,7 @@ labels `workflow-run=true` and `workflow-agent=<name>`, and the name
 | `RUN_RECEIVER_CONFIG` | The list of agents. Default `/etc/run-receiver/agents.yaml` |
 | `POD_NAMESPACE` | Its namespace, from the downward API. Each Job goes there |
 | `RUN_RECEIVER_MAX_INPUT_BYTES`, `RUN_RECEIVER_POLL_SECONDS` | Optional: 262144, and 2 |
-| `RUN_RECEIVER_RECORD_SECONDS` | Optional: the wait between two rounds of the loop that keeps the results of ended Jobs. Default 10; `0` turns the loop off |
+| `RUN_RECEIVER_RECORD_SECONDS` | Optional: the wait between two rounds of the loop that follows the runs no call started and keeps the results of ended Jobs. Default 10; `0` turns the loop off |
 
 ### Environment of `sweep`
 
@@ -272,6 +281,9 @@ at `litellm-app.ai`, the trace collector at `alloy.monitoring`, and GitHub in
    GitHub got the test credentials from the providers (the sandbox has only a
    placeholder), the spans got to the collector, and no sandbox is left. The
    same key gets the same run, also after the pod of the run is deleted.
+   The cluster has the pod GC of the platform (`terminated-pod-gc-threshold:
+   1`), and the test deletes the run pod the moment it ends: the answer still
+   has the output.
 2. A second key for the same head is skipped: one comment for one head.
 3. A run job that gets SIGTERM in the middle of a run deletes its sandbox,
    and the sweep (`--dry-run`) finds the sandbox by its label first.

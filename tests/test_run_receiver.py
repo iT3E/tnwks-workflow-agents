@@ -53,7 +53,9 @@ class ReceiverTest(unittest.TestCase):
             NAMESPACE,
             poll_seconds=0.05,
             record_seconds=self.record_seconds,
+            follow_wait_seconds=0.5,
         )
+        self.receiver = receiver
         self.app = Asgi(receiver_app.create_app(receiver)).__enter__()
         self.http = httpx.Client(base_url=self.app.url, timeout=30, headers={"authorization": f"Bearer {TOKEN}"})
 
@@ -323,15 +325,87 @@ class KeptResult(ReceiverTest):
         big = {"status": "reviewed", "text": "x" * (receiver_app.RESULT_MAX_BYTES + 10)}
         self.finish_soon(key, log=result_log(status="succeeded", output=big, seconds=12.5))
         first = self.post(key=key)
-        self.assertEqual(first.json()["output"], big)
         kept = json.loads(self.kept(key))
         self.assertEqual(kept, {"status": "succeeded", "seconds": 12.5, "output_kept": False})
         self.kube.gc_pod(receiver_app.job_name(key))
-        r = self.http.get(f"/runs/{key}")
+        # The same answer on the first call and later: the status, and no output.
+        for r in (first, self.http.get(f"/runs/{key}")):
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["status"], "succeeded")
+            self.assertIs(r.json()["output_kept"], False)
+            self.assertNotIn("output", r.json())
+
+
+class FollowTheLog(ReceiverTest):
+    """The pod GC can delete the run pod right after it ends, before the Job reads as ended."""
+
+    record_seconds = 0.05
+    OUTPUT = {"status": "reviewed", "verdict": "ready", "comment_url": "https://github.example/c/1"}
+
+    def kept(self, key):
+        return self.kube.annotations(receiver_app.job_name(key)).get(receiver_app.RESULT_ANNOTATION)
+
+    def end_and_collect(self, name):
+        """The run job wrote its result line and ended; the pod GC deletes the pod; then the Job reads as ended."""
+        self.kube.end_pod(name)
+        self.kube.gc_pod(name)
+        self.kube.complete(name)
+
+    def test_a_waiting_call_gets_the_output_when_the_pod_goes_before_the_job_ends(self):
+        key = "race-1"
+        name = receiver_app.job_name(key)
+        answer = {}
+        caller = threading.Thread(target=lambda: answer.update(r=self.post(key=key)))
+        caller.start()
+        wait_until("the Job", lambda: name in self.kube.jobs)
+        self.kube.start_pod(name, "INFO run_job: sandbox ready\n")
+        time.sleep(0.2)
+        self.kube.write(name, result_log(status="succeeded", output=self.OUTPUT))
+        wait_until("the result line read", lambda: self.kept(key))
+        self.end_and_collect(name)
+        caller.join(10)
+        r = answer["r"]
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["status"], "succeeded")
-        self.assertIs(r.json()["output_kept"], False)
-        self.assertNotIn("output", r.json())
+        self.assertEqual(r.json()["output"], self.OUTPUT)
+        self.assertNotIn("output_kept", r.json())
+        again = self.http.get(f"/runs/{key}")
+        self.assertEqual((again.status_code, again.json()["output"]), (200, self.OUTPUT), again.text)
+
+    def test_a_run_that_nobody_waits_for_keeps_its_output_when_the_pod_goes_at_once(self):
+        key = "race-2"
+        name = receiver_app.job_name(key)
+        self.assertEqual(self.post(key=key, wait=False).status_code, 202)
+        self.kube.start_pod(name, result_log(status="succeeded", output=self.OUTPUT))
+        time.sleep(0.3)  # a few polls; the run job exits, and its pod goes before the Job reads as ended
+        self.end_and_collect(name)
+        r = self.post(key=key)
+        self.assertEqual((r.status_code, r.json()["output"]), (200, self.OUTPUT), r.text)
+
+    def test_the_loop_follows_a_run_that_no_call_started(self):
+        # A run Job that the receiver did not make in this life (it started again).
+        self.post(key="race-3", wait=False)
+        source = self.kube.jobs[receiver_app.job_name("race-3")]
+        name = receiver_app.job_name("race-4")
+        twin = json.loads(json.dumps(source))
+        twin["metadata"]["name"] = name
+        self.kube.jobs[name] = twin
+        self.kube.start_pod(name, result_log(status="succeeded", output=self.OUTPUT))
+        wait_until("the result line read by the loop", lambda: self.kept("race-4"))
+        self.end_and_collect(name)
+        r = self.http.get("/runs/race-4")
+        self.assertEqual((r.status_code, r.json()["output"]), (200, self.OUTPUT), r.text)
+
+    def test_one_follower_for_one_run(self):
+        key = "race-5"
+        name = receiver_app.job_name(key)
+        for _ in range(3):
+            self.post(key=key, wait=False)
+        self.kube.start_pod(name, "INFO waiting\n")
+        time.sleep(0.3)
+        self.assertEqual(list(self.receiver.followers), [name])
+        logs = [q["path"] for q in self.kube.server.requests if f"/pods/{name}-pod/log" in q["path"]]
+        self.assertTrue(logs)
+        self.assertTrue(all("follow=true" in p for p in logs), logs)
 
 
 class Logging(ReceiverTest):
