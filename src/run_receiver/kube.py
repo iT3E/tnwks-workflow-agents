@@ -5,7 +5,7 @@
     GET   /apis/batch/v1/namespaces/{ns}/jobs?labelSelector=   list     jobs
     PATCH /apis/batch/v1/namespaces/{ns}/jobs/{name}           patch    jobs (an annotation only)
     GET   /api/v1/namespaces/{ns}/pods?labelSelector=...       list     pods
-    GET   /api/v1/namespaces/{ns}/pods/{name}/log              get      pods/log
+    GET   /api/v1/namespaces/{ns}/pods/{name}/log              get      pods/log (also with follow=true)
 
 In a pod, the client uses the service account token and CA of the pod. The
 token file is read again for each call, because Kubernetes rotates it.
@@ -13,6 +13,7 @@ token file is read again for each call, because Kubernetes rotates it.
 
 import json
 import os
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -103,8 +104,8 @@ class Kube:
         if r.status_code >= 300:
             raise KubeError(f"patch job: {r.status_code} {r.text[:300]}")
 
-    async def job_log(self, namespace: str, job_name: str, container: str) -> tuple[str, bool] | None:
-        """The log of the newest pod of the Job, and whether that pod has ended. None when the Job has no pod."""
+    async def newest_pod(self, namespace: str, job_name: str) -> dict | None:
+        """The newest pod of the Job, or None."""
         r = await self._call(
             "GET",
             f"/api/v1/namespaces/{namespace}/pods",
@@ -116,8 +117,13 @@ class Kube:
         if not pods:
             return None
         pods.sort(key=lambda p: (p.get("metadata") or {}).get("creationTimestamp") or "")
-        pod = pods[-1]
-        ended = (pod.get("status") or {}).get("phase") in ENDED_PHASES
+        return pods[-1]
+
+    async def job_log(self, namespace: str, job_name: str, container: str) -> tuple[str, bool] | None:
+        """The log of the newest pod of the Job, and whether that pod has ended. None when the Job has no pod."""
+        pod = await self.newest_pod(namespace, job_name)
+        if pod is None:
+            return None
         r = await self._call(
             "GET",
             f"/api/v1/namespaces/{namespace}/pods/{pod['metadata']['name']}/log",
@@ -127,4 +133,39 @@ class Kube:
             return None
         if r.status_code >= 300:
             raise KubeError(f"pod log: {r.status_code}")
-        return r.text, ended
+        return r.text, pod_ended(pod)
+
+    async def log_lines(self, namespace: str, pod: str, container: str) -> AsyncIterator[str]:
+        """The log of a container, line by line, as it is written (follow=true), to the end of the container.
+
+        No read timeout: a run can write nothing for minutes. The stream ends
+        when the container ends, or when the API server or the kubelet ends it.
+        """
+        path = f"/api/v1/namespaces/{namespace}/pods/{pod}/log"
+        try:
+            async with self.http.stream(
+                "GET",
+                path,
+                params={"container": container, "follow": "true"},
+                headers=self._headers(),
+                timeout=httpx.Timeout(30, read=None),
+            ) as r:
+                if r.status_code >= 300:
+                    raise KubeError(f"pod log stream: {r.status_code}")
+                async for line in r.aiter_lines():
+                    yield line
+        except httpx.HTTPError as e:
+            raise KubeError(f"GET {path}: {type(e).__name__}") from e
+
+
+def pod_ended(pod: dict) -> bool:
+    return (pod.get("status") or {}).get("phase") in ENDED_PHASES
+
+
+def container_started(pod: dict, container: str) -> bool:
+    """The container runs or ran, so its log can be read."""
+    for c in (pod.get("status") or {}).get("containerStatuses") or []:
+        if c.get("name") == container:
+            state = c.get("state") or {}
+            return "running" in state or "terminated" in state
+    return False

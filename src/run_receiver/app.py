@@ -11,20 +11,25 @@ second Job: it gets the same run, and its answer when the run ends. The caller
 sets the agent name, the input and the key, and nothing else of the Job.
 
 The answer of a run is the result line in the log of its pod. A cluster can
-delete the pod of an ended Job long before the Job (the pod GC), so the
-receiver keeps the result in the annotation workflow-agents/result of the Job
-when it first reads it: on a call, and in a loop over the ended Jobs that have
-no result yet. A later call reads the annotation. When the pod went before
-the receiver read it, the answer is the state of the Job, with
-"output_kept": false.
+delete the pod of an ended Job seconds after it ends (the pod GC deletes the
+oldest terminated pods of the whole cluster over its threshold), so the
+receiver does not wait for the end to read the log. For each running run it
+follows the log of the pod as it is written (follow=true), from a call that
+makes or finds the run, and from the loop for a run that nobody called about
+(after a restart of the receiver). The result line is in hand when the run
+job writes it, before its pod can end. The receiver keeps it in the
+annotation workflow-agents/result of the Job, and a later call reads the
+annotation. When the receiver was down for the whole end of a run, the
+answer is the state of the Job, with "output_kept": false.
 
 Environment:
     RUN_RECEIVER_TOKEN            the token of the callers, at least 32 characters
     RUN_RECEIVER_CONFIG           the list of agents. Default /etc/run-receiver/agents.yaml
     RUN_RECEIVER_MAX_INPUT_BYTES  the largest input, as JSON. Default 262144
     RUN_RECEIVER_POLL_SECONDS     the wait between two reads of a Job. Default 2
-    RUN_RECEIVER_RECORD_SECONDS   the wait between two rounds of the loop that keeps
-                                  the results of ended Jobs. Default 10; 0 turns it off
+    RUN_RECEIVER_RECORD_SECONDS   the wait between two rounds of the loop that follows the
+                                  runs no call started and keeps the results of ended
+                                  Jobs. Default 10; 0 turns it off
     POD_NAMESPACE                 the namespace of the receiver and its Jobs
 """
 
@@ -37,6 +42,7 @@ import os
 import re
 import sys
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -44,7 +50,7 @@ from fastapi.responses import JSONResponse
 
 from run_job import result
 from run_receiver import config
-from run_receiver.kube import Kube, KubeError, own_namespace
+from run_receiver.kube import Kube, KubeError, container_started, own_namespace, pod_ended
 
 log = logging.getLogger("run_receiver")
 
@@ -60,6 +66,9 @@ RESULT_ANNOTATION = "workflow-agents/result"
 RESULT_MAX_BYTES = 65536
 # The kept result of a run whose pod went before the receiver read its log.
 GONE = {"output_kept": False}
+# The results the receiver read, in memory too: the answer of a call does not
+# wait for the annotation, and a refused patch loses nothing while it runs.
+RESULTS_IN_MEMORY = 256
 
 
 def job_name(key: str) -> str:
@@ -85,6 +94,18 @@ def job_state(job: dict) -> str:
     return result.RUNNING
 
 
+def kept_result(job: dict | None) -> dict | None:
+    """The result kept in the annotation of the Job, or None."""
+    kept = (((job or {}).get("metadata") or {}).get("annotations") or {}).get(RESULT_ANNOTATION)
+    if kept is None:
+        return None
+    try:
+        value = json.loads(kept)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class Receiver:
     def __init__(
         self,
@@ -95,6 +116,7 @@ class Receiver:
         max_input_bytes: int = 262144,
         poll_seconds: float = 2.0,
         record_seconds: float = 10.0,
+        follow_wait_seconds: float = 30.0,
     ):
         if len(token) < MIN_TOKEN_LENGTH:
             raise config.ConfigError(f"the token must have at least {MIN_TOKEN_LENGTH} characters")
@@ -105,16 +127,27 @@ class Receiver:
         self.max_input_bytes = max_input_bytes
         self.poll_seconds = poll_seconds
         self.record_seconds = record_seconds
+        self.follow_wait_seconds = follow_wait_seconds
         self._record_error = ""
+        self.followers: dict[str, asyncio.Task] = {}
+        self.results: OrderedDict[str, dict] = OrderedDict()
 
     def authorized(self, request: Request) -> bool:
         return hmac.compare_digest(request.headers.get("authorization", "").encode(), self._auth)
+
+    def remember(self, name: str, found: dict) -> None:
+        self.results[name] = found
+        self.results.move_to_end(name)
+        while len(self.results) > RESULTS_IN_MEMORY:
+            self.results.popitem(last=False)
 
     async def keep(self, name: str, found: dict) -> None:
         """Keep the result in the annotation of the Job. A failure is a log line: the answer goes on."""
         text = canonical(found)
         if len(text.encode()) > RESULT_MAX_BYTES:
-            text = canonical({k: v for k, v in found.items() if k != "output"} | GONE)
+            found = {k: v for k, v in found.items() if k != "output"} | GONE
+            text = canonical(found)
+        self.remember(name, found)  # the same answer from memory as from the annotation
         try:
             await self.kube.annotate_job(self.namespace, name, {RESULT_ANNOTATION: text})
         except KubeError as e:
@@ -122,28 +155,77 @@ class Receiver:
         else:
             log.info("run %s: result kept (%s)", name, found.get("status") or "the pod is gone")
 
-    async def result_of(self, job: dict) -> dict:
-        """The result of an ended run: the kept one, or the one in the log of its pod (and then kept)."""
-        meta = job.get("metadata") or {}
-        kept = (meta.get("annotations") or {}).get(RESULT_ANNOTATION)
-        if kept is not None:
+    def follow(self, name: str) -> asyncio.Task:
+        """The one task that follows the log of the run of this Job (made once)."""
+        task = self.followers.get(name)
+        if task is None or task.done():
+            task = asyncio.create_task(self._follow(name))
+            self.followers[name] = task
+            task.add_done_callback(lambda t: self.followers.pop(name, None) if self.followers.get(name) is t else None)
+        return task
+
+    async def _follow(self, name: str) -> None:
+        """Read the log of the run pod as it is written, and keep the result line when it comes.
+
+        The run job writes the result line last, just before it exits. The pod
+        GC deletes only a pod that has ended, so the line reaches this stream
+        before the pod can go. A stream that breaks starts again from the start
+        of the log. The task ends with the result, or when there is nothing
+        more to read: then outcome() reads what is left.
+        """
+        while True:
             try:
-                value = json.loads(kept)
-            except ValueError:
-                value = None
-            if isinstance(value, dict):
-                return value
+                job = await self.kube.get_job(self.namespace, name)
+                if job is None or RESULT_ANNOTATION in ((job.get("metadata") or {}).get("annotations") or {}):
+                    return
+                pod = await self.kube.newest_pod(self.namespace, name)
+                if pod is not None and container_started(pod, config.CONTAINER):
+                    found = None
+                    async for line in self.kube.log_lines(self.namespace, pod["metadata"]["name"], config.CONTAINER):
+                        value = result.find(line)
+                        if value is not None:
+                            found = value
+                    if found is not None:
+                        await self.keep(name, found)
+                        return
+                if job_state(job) != result.RUNNING and (pod is None or pod_ended(pod)):
+                    return
+            except KubeError as e:
+                log.warning("run %s: the log is not followed: %s", name, e)
+            await asyncio.sleep(self.poll_seconds)
+
+    async def result_of(self, job: dict) -> dict:
+        """The result of an ended run: in memory, kept, from its follower, or from the log of its pod (then kept)."""
+        meta = job.get("metadata") or {}
         name = meta["name"]
+        if name in self.results:
+            return self.results[name]
+        value = kept_result(job)
+        if value is not None:
+            return value
+        task = self.followers.get(name)
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), self.follow_wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+            if name in self.results:
+                return self.results[name]
         got = await self.kube.job_log(self.namespace, name, config.CONTAINER)
         if got is None:
+            # Kept in the meantime (by a follower of another call)? Then never write "gone" over it.
+            fresh = await self.kube.get_job(self.namespace, name)
+            value = kept_result(fresh)
+            if value is not None:
+                return value
             found = dict(GONE)
         else:
-            text, pod_ended = got
+            text, ended = got
             found = result.find(text) or {}
-            if not pod_ended:  # the pod still stops: its log is not the last one
+            if not ended:  # the pod still stops: its log is not the last one
                 return found
         await self.keep(name, found)
-        return found
+        return self.results.get(name, found)
 
     async def outcome(self, job: dict, key: str) -> tuple[int, dict]:
         name = job["metadata"]["name"]
@@ -175,13 +257,17 @@ class Receiver:
         return HTTP_OF[status], body
 
     async def keep_ended(self) -> int:
-        """One round of the loop: keep the result of each ended run Job that has none yet."""
+        """One round of the loop: follow each running run that has no follower, keep each ended one with no result."""
         count = 0
         for job in await self.kube.list_jobs(self.namespace, AGENT_LABEL):
             meta = job.get("metadata") or {}
-            if not str(meta.get("name", "")).startswith("run-") or job_state(job) == result.RUNNING:
+            name = str(meta.get("name", ""))
+            if not name.startswith("run-") or RESULT_ANNOTATION in (meta.get("annotations") or {}):
                 continue
-            if RESULT_ANNOTATION in (meta.get("annotations") or {}):
+            if job_state(job) == result.RUNNING:
+                self.follow(name)
+                continue
+            if name in self.followers:
                 continue
             await self.result_of(job)
             count += 1
@@ -246,6 +332,7 @@ class Receiver:
                 if annotations.get("workflow-agents/fingerprint") != mark:
                     return 409, {"error": "the key belongs to a run with a different agent or input", "key": key}
         log.info("run %s of %s: %s", name, agent, "created" if created else "already there")
+        self.follow(name)
 
         deadline = template["spec"]["activeDeadlineSeconds"] + WAIT_MARGIN_SECONDS
         until = time.monotonic() + (deadline if wait else 0)
@@ -280,6 +367,8 @@ def create_app(receiver: Receiver) -> FastAPI:
         finally:
             if task is not None:
                 task.cancel()
+            for follower in list(receiver.followers.values()):
+                follower.cancel()
 
     app = FastAPI(title="run receiver", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 

@@ -99,14 +99,35 @@ if [[ "${cli_version#v}" != "$openshell_version" ]]; then
 fi
 
 step "cluster: $node_image"
+# The pod GC as in the platform cluster (terminated-pod-gc-threshold 1): it
+# deletes each terminated pod of the cluster but the newest, at most 20 s after
+# it ends. The run receiver must get the result line of a run before that.
+# kind writes a kubeadm v1beta4 config for this node release, where extraArgs
+# is a list: the patch adds one item.
 cat > "$work/kind.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
+kubeadmConfigPatchesJSON6902:
+  - group: kubeadm.k8s.io
+    version: v1beta4
+    kind: ClusterConfiguration
+    patch: |
+      - op: add
+        path: /controllerManager/extraArgs/-
+        value:
+          name: terminated-pod-gc-threshold
+          value: "1"
 EOF
 kind create cluster --name "$cluster" --image "$node_image" --config "$work/kind.yaml" \
   --kubeconfig "$work/kubeconfig" --wait 180s
+
+kx -n kube-system get pods -l component=kube-controller-manager -o jsonpath='{.items[0].spec.containers[0].command}' |
+  grep -q -- '--terminated-pod-gc-threshold=1' || {
+  echo "up.sh: the controller manager has no terminated-pod-gc-threshold=1" >&2
+  exit 1
+}
 
 step "load the image under test: $image"
 kind load docker-image "$image" --name "$cluster"

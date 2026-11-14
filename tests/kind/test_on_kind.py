@@ -14,10 +14,12 @@ of the test cluster (IMAGE_TEST_KUBECONFIG).
 """
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import uuid
@@ -146,6 +148,38 @@ def wait_job(name: str, timeout: int = 300) -> str:
     return wait_for(f"the Job {name}", ended, timeout)
 
 
+def run_job_name(key: str) -> str:
+    """The Job name of a key, as the run receiver makes it."""
+    return "run-" + hashlib.sha256(key.encode()).hexdigest()[:20]
+
+
+POD_PHASES = 'jsonpath={range .items[*]}{.metadata.name} {.status.phase}{"\\n"}{end}'
+
+
+class PodDeleter(threading.Thread):
+    """Delete the pod of a run Job as soon as it has ended (Succeeded or Failed)."""
+
+    def __init__(self, job: str, timeout: float = 900):
+        super().__init__(daemon=True)
+        self.job, self.timeout = job, timeout
+        self.deleted, self.seen = False, []
+
+    def run(self):
+        deadline = time.monotonic() + self.timeout
+        selector = f"batch.kubernetes.io/job-name={self.job}"
+        while time.monotonic() < deadline:
+            done = kx("-n", WORKFLOWS_NS, "get", "pods", "-l", selector, "-o", POD_PHASES, check=False)
+            for line in done.stdout.splitlines():
+                name, _, phase = line.strip().partition(" ")
+                if phase and (not self.seen or self.seen[-1] != (name, phase)):
+                    self.seen.append((name, phase))
+                if phase in ("Succeeded", "Failed"):
+                    kx("-n", WORKFLOWS_NS, "delete", "pod", name, "--wait=false", check=False)
+                    self.deleted = True
+                    return
+            time.sleep(0.2)
+
+
 @unittest.skipUnless(os.environ.get("IMAGE_TEST_KUBECONFIG"), "no test cluster (tests/kind/up.sh, CI only)")
 class RunJobOnKind(unittest.TestCase):
     @classmethod
@@ -160,8 +194,15 @@ class RunJobOnKind(unittest.TestCase):
 
     def test_1_a_whole_run_answers_through_the_receiver_and_leaves_no_sandbox(self):
         key = f"kind-review-{uuid.uuid4().hex[:8]}"
+        # The pod of the run goes the moment it ends, before the Job reads as
+        # ended (the pod GC of the cluster can do that too): the answer must
+        # still have the output.
+        deleter = PodDeleter(run_job_name(key))
+        deleter.start()
         start = time.monotonic()
         code, body = self.post_run(key, self.input)
+        deleter.join(60)
+        print(f"the run pod: {deleter.seen}, deleted at its end: {deleter.deleted}")
         print(f"\nPOST /runs: {code} in {time.monotonic() - start:.0f} s: {json.dumps(body)[:1500]}")
         if isinstance(body, dict) and body.get("job"):
             print("the run job log:\n" + job_log(body["job"]))
@@ -173,6 +214,8 @@ class RunJobOnKind(unittest.TestCase):
         self.assertEqual(body["status"], "succeeded")
         self.assertTrue(body["created"])
         self.assertEqual(body["output"]["status"], "reviewed", body)
+        self.assertTrue(deleter.deleted, f"the run pod was not deleted at its end: {deleter.seen}")
+        self.assertNotIn("output_kept", body)
         self.assertEqual(body["output"]["verdict"], "needs-changes")
 
         # The credentials: each call of the sandbox reached the fakes with the
