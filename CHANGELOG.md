@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.1.4 - 2026-11-14
+
+### Fixed
+
+* run receiver: the output of a run no longer depends on its pod after the end. The pod GC can delete the run pod seconds after it ends (it deletes the oldest terminated pods of the whole cluster), so the receiver now follows the log of each running run (follow=true, no new rights) and keeps the result line when the run job writes it. A result over 64 KiB is answered without its output on every call
+
 ## v0.1.3 - 2026-11-13
 
 ### Fixed
