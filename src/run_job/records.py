@@ -3,9 +3,10 @@
 A delete through the sandbox gateway can answer with success and leave the
 Sandbox record (agents.x-k8s.io) of the sandbox: OpenShell 0.1.8 does that
 when its label lookup finds no record, and it then forgets the sandbox, so a
-second delete or a list through the gateway can't see it any more. So the run
-job reads the record after its delete, and the sweep lists the records here as
-well as through the gateway.
+second delete or a list through the gateway can't see it any more. So the
+sweep lists the records here as well as through the gateway, and removes an
+old one that the gateway left. (The run receiver checks the record of each run
+after its end with its own client, run_receiver/kube.py, and the helpers here.)
 
     GET    /apis/agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxes?labelSelector=...  list    sandboxes
     DELETE /apis/agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxes/{name}             delete  sandboxes (the sweep only)

@@ -15,12 +15,12 @@ import time
 import unittest
 
 import support  # noqa: F401  (sets the import path)
-from support import EXAMPLES, Asgi, fake_kube
+from support import EXAMPLES, Asgi, fake_kube, fake_sandboxes
 
 import httpx
 import yaml
 
-from run_job import result
+from run_job import names, result
 from run_receiver import app as receiver_app
 from run_receiver import config
 from run_receiver.kube import Kube
@@ -38,6 +38,7 @@ def result_log(**fields) -> str:
 
 class ReceiverTest(unittest.TestCase):
     record_seconds = 0.0  # the loop that keeps results: off, but in KeptResult
+    sandbox_grace_seconds = 60.0  # the check of the Sandbox records waits this long after the end of a run
 
     def setUp(self):
         self.kube = fake_kube.FakeKube().__enter__()
@@ -54,6 +55,7 @@ class ReceiverTest(unittest.TestCase):
             poll_seconds=0.05,
             record_seconds=self.record_seconds,
             follow_wait_seconds=0.5,
+            sandbox_grace_seconds=self.sandbox_grace_seconds,
         )
         self.receiver = receiver
         self.app = Asgi(receiver_app.create_app(receiver)).__enter__()
@@ -235,6 +237,21 @@ class OneRunForOneKey(ReceiverTest):
         r = self.post(key="key-5")
         self.assertEqual(r.status_code, 502)
         self.assertEqual(r.json()["error"], "no answer on /ping in 180 s")
+
+    def test_a_run_whose_sandbox_delete_failed_keeps_its_answer_so_no_retry_follows(self):
+        # Exit 6: the agent answered (and the reviewer posted its comment), and the
+        # delete of the sandbox failed, so the Job failed. The answer stays a
+        # success with its output: the caller retries only a failed or timed out
+        # answer, so no second run and no second comment. (When this result is
+        # lost too, the answer is the failed Job: the retry runs with a new key,
+        # and the reviewer finds its comment on the head and skips.)
+        key = "delete-failed-1"
+        output = {"status": "reviewed", "verdict": "ready"}
+        log = result_log(status="succeeded", output=output, sandbox_deleted=False)
+        self.finish_soon(key, condition="Failed", reason="BackoffLimitExceeded", log=log)
+        r = self.post(key=key)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["status"], r.json()["output"]), ("succeeded", output))
 
     def test_a_run_at_its_time_limit_is_a_504(self):
         self.post(key="key-6", wait=False)
@@ -473,6 +490,99 @@ class ResultGone(ReceiverTest):
         r, _ = self.gone("gone-3", "Failed", "DeadlineExceeded")
         self.assertEqual((r.status_code, r.json()["status"]), (504, "timed_out"), r.text)
         self.assertIs(r.json()["output_kept"], False)
+
+
+class SandboxRecords(ReceiverTest):
+    """After the end of a run, the receiver checks that the Sandbox record of its sandbox went."""
+
+    record_seconds = 0.05
+    sandbox_grace_seconds = 0.0
+    OUTPUT = {"status": "reviewed", "verdict": "ready"}
+
+    def check(self, key):
+        return self.kube.annotations(receiver_app.job_name(key)).get(receiver_app.SANDBOX_ANNOTATION)
+
+    def ended(self, key, sandbox, **fields):
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        log = result_log(status="succeeded", output=self.OUTPUT, sandbox=sandbox, sandbox_deleted=True, **fields)
+        self.kube.finish(name, log=log)
+        return name
+
+    def test_a_record_that_went_is_kept_as_gone_with_no_log_line(self):
+        key = "record-1"
+        sandbox = names.sandbox_name(key, time.time())
+        with self.assertNoLogs("run_receiver", level="WARNING"):
+            self.ended(key, sandbox)
+            wait_until("check of the record", lambda: self.check(key))
+        self.assertEqual(self.check(key), "gone")
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual((r.status_code, r.json()["sandbox_record"]), (200, "gone"), r.text)
+
+    def test_a_record_that_stays_is_one_error_line_and_the_answer_stays(self):
+        key = "record-2"
+        sandbox = names.sandbox_name(key, time.time())
+        self.kube.sandboxes.append(fake_sandboxes.record(sandbox))
+        with self.assertLogs("run_receiver", level="ERROR") as seen:
+            name = self.ended(key, sandbox)
+            wait_until("check of the record", lambda: self.check(key))
+            time.sleep(0.2)  # more rounds: one check only
+        self.assertEqual(self.check(key), f"left: {sandbox}")
+        [line] = seen.output
+        self.assertIn(f"run {name}: the Sandbox record of {sandbox} is still there", line)
+        self.assertIn("(sandbox_deleted in its result: true)", line)
+        r = self.http.get(f"/runs/{key}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["status"], r.json()["output"]), ("succeeded", self.OUTPUT))
+        self.assertEqual(r.json()["sandbox_record"], f"left: {sandbox}")
+
+    def test_a_lost_result_is_checked_by_the_prefix_of_the_run_key(self):
+        key = "record-3"
+        sandbox = names.sandbox_name(key, time.time())
+        self.kube.sandboxes.append(fake_sandboxes.record(sandbox))
+        other = names.sandbox_name("another-key", time.time())
+        self.kube.sandboxes.append(fake_sandboxes.record(other))
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        self.kube.finish(name, log="")
+        self.kube.gc_pod(name)  # the result line is lost
+        wait_until("check of the record", lambda: self.check(key))
+        self.assertEqual(self.check(key), f"left: {sandbox}")
+
+    def test_only_a_record_that_openshell_made_counts(self):
+        key = "record-4"
+        sandbox = names.sandbox_name(key, time.time())
+        labels = {"openshell.ai/managed-by": "openshell", "openshell.ai/sandbox-name": "platform-probe"}
+        self.kube.sandboxes.append(fake_sandboxes.record(sandbox, labels=labels))
+        self.kube.sandboxes.append(fake_sandboxes.record(names.sandbox_name(key, time.time() - 9)))  # another sandbox
+        self.ended(key, sandbox)
+        wait_until("check of the record", lambda: self.check(key))
+        self.assertEqual(self.check(key), "gone")
+
+    def test_no_right_to_list_records_is_one_warning_and_results_are_still_kept(self):
+        self.kube.refuse_sandboxes = 403
+        key = "record-5"
+        with self.assertLogs("run_receiver", level="WARNING") as seen:
+            name = self.ended(key, names.sandbox_name(key, time.time()))
+            wait_until("kept result", lambda: receiver_app.RESULT_ANNOTATION in self.kube.annotations(name))
+            time.sleep(0.3)  # more rounds: still one line
+        warnings = [line for line in seen.output if line.startswith("WARNING")]
+        self.assertEqual(warnings, ["WARNING:run_receiver:the check of the Sandbox records: list sandboxes: 403"])
+        self.assertIsNone(self.check(key))
+
+
+class SandboxRecordsWait(ReceiverTest):
+    record_seconds = 0.05  # the grace of 60 s holds
+
+    def test_no_check_before_the_grace_after_the_end(self):
+        key = "record-6"
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        self.kube.finish(name, log=result_log(status="succeeded", output={}, sandbox="run-0000000-1"))
+        wait_until("kept result", lambda: receiver_app.RESULT_ANNOTATION in self.kube.annotations(name))
+        time.sleep(0.3)
+        self.assertNotIn(receiver_app.SANDBOX_ANNOTATION, self.kube.annotations(name))
+        self.assertFalse([q for q in self.kube.server.requests if "/sandboxes" in q["path"]])
 
 
 class KeepFails(ReceiverTest):

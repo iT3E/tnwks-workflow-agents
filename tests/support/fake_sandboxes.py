@@ -26,8 +26,6 @@ from . import Server
 
 TOKEN = "test-sandbox-reader-token"
 NAMESPACE = "agents-workflows"
-# A record with this annotation is in deletion, and goes after that many more reads.
-READS_LEFT = "test/reads-left"
 
 
 def record(sandbox: str, created: float | None = None, labels: dict | None = None, name: str = "") -> dict:
@@ -101,18 +99,7 @@ class FakeSandboxes:
         if method == "GET" and not m.group(1):
             terms = [t for t in parse_qs(url.query).get("labelSelector", [""])[0].split(",") if t]
             want = dict(t.split("=", 1) for t in terms)
-            items = []
-            for rec in self._all():
-                left = (rec["metadata"].get("annotations") or {}).get(READS_LEFT)
-                if left is not None:  # a record in deletion that goes after some reads
-                    file = self.dir / f"{rec['metadata']['name']}.json"
-                    if int(left) <= 0:
-                        file.unlink()
-                        continue
-                    rec["metadata"]["annotations"][READS_LEFT] = str(int(left) - 1)
-                    file.write_text(json.dumps(rec))
-                if all(rec["metadata"]["labels"].get(k) == v for k, v in want.items()):
-                    items.append(rec)
+            items = [r for r in self._all() if all(r["metadata"]["labels"].get(k) == v for k, v in want.items())]
             return 200, {"kind": "SandboxList", "items": items}, None
         if method == "DELETE" and m.group(1):
             file = self.dir / f"{m.group(1)}.json"

@@ -22,9 +22,14 @@ def base36(n: int) -> str:
             return out
 
 
+def key_prefix(key: str) -> str:
+    """The start of the name of each sandbox of a run key: run-<7 hex of the key>-."""
+    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:7]}-"
+
+
 def sandbox_name(key: str, now: float) -> str:
     """run-<7 hex of the key>-<start time in base 36>."""
-    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:7]}-{base36(int(now))}"
+    return f"{key_prefix(key)}{base36(int(now))}"
 
 
 def started_at(name: str) -> int | None:

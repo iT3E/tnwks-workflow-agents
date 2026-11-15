@@ -22,7 +22,14 @@ never removed, and a record that the gateway lists is never removed through
 the API before the gateway delete. The limit must be more than the time limit
 of a run job with its grace period (the admission policy of the run namespace
 admits one hour at most), so that a record older than the limit belongs to no
-live run. A 404 between a read and a delete counts as gone. The sweep starts
+live run. The three clocks differ: the name holds the time of the node of the
+run job, the creationTimestamp that of the API server, and the age is read on
+the node of the sweep. A skew of seconds or minutes between them is far less
+than the margin between the limit (3600 s) and the time limit of a run (2400
+s and 90 s of grace in the example); the younger clock counts, so a skew
+can make a record look younger, never older than by the skew. When the
+gateway list fails, no record counts as known to the gateway, and the age
+rule alone decides. A 404 between a read and a delete counts as gone. The sweep starts
 no new sandbox when the rest of its deadline is less than the worst case of
 one, and leaves the rest for the next sweep.
 

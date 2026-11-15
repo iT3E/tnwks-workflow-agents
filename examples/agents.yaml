@@ -26,8 +26,8 @@ agents:
           spec:
             restartPolicy: Never
             serviceAccountName: workflow-run
-            automountServiceAccountToken: true   # to list Sandbox records only (its Role): the check after the delete
-            terminationGracePeriodSeconds: 150    # time to delete the sandbox, and to see its record go, after SIGTERM
+            automountServiceAccountToken: false  # the run job calls no Kubernetes API
+            terminationGracePeriodSeconds: 90     # time to delete the sandbox after SIGTERM
             securityContext:
               runAsNonRoot: true
               runAsUser: 10001

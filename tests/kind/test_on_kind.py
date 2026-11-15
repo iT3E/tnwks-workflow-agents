@@ -256,6 +256,15 @@ class RunJobOnKind(unittest.TestCase):
         code, state = http("GET", f"{RECEIVER_URL}/runs/{key}", self.token)
         self.assertEqual((code, state.get("output")), (200, body["output"]), state)
 
+        # The receiver lists the Sandbox records of the real Agent Sandbox with
+        # its Role, after the grace of the receiver, and keeps "gone".
+        def checked():
+            meta = json.loads(kx("-n", WORKFLOWS_NS, "get", "job", job, "-o", "json").stdout)["metadata"]
+            return (meta.get("annotations") or {}).get("workflow-agents/sandbox-record")
+
+        wait_for("the check of the Sandbox record", checked, 120)
+        self.assertEqual(checked(), "gone")
+
     def test_2_a_second_run_for_the_same_head_is_skipped(self):
         code, body = self.post_run(f"kind-again-{uuid.uuid4().hex[:8]}", self.input)
         self.assertEqual(code, 200, body)

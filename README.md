@@ -102,7 +102,7 @@ receiver does not wait for the end of a run to read its log:
   (`200`), `failed` (`502`) or `timed_out` (`504`), with `"output_kept":
   false` and no `output`. A failed run says so in `error`. The Job state is
   true: the run job ends with exit code 0 only when the agent answered and
-  its sandbox was deleted, with no Sandbox record left.
+  its sandbox was deleted.
 - A kept result changes only an annotation of the Job (a merge patch of
   `metadata.annotations`). If the patch fails, the receiver still answers
   from what it read, and logs one line.
@@ -130,8 +130,8 @@ The state of the run of that key, with the same bodies and codes as `POST`
 | Command (`args`) | Part | Kubernetes rights of its service account |
 | --- | --- | --- |
 | `serve` (or none) | A workflow agent, for the agent of `AGENT_NAME` | None. In a sandbox it has no service account token |
-| `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`, `list`, `patch` (the annotation of the kept result only); `pods`: `list`; `pods/log`: `get` |
-| `run-job` | The run job, a Job from the template | A Role in its own namespace: `sandboxes` (`agents.x-k8s.io`): `list`, to read the Sandbox record of its sandbox after the delete. The Job sets `automountServiceAccountToken: true`. It talks to the sandbox gateway with the client certificate |
+| `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`, `list`, `patch` (the annotations of the kept result and of the record check only); `pods`: `list`; `pods/log`: `get`; `sandboxes` (`agents.x-k8s.io`): `list`, to check the Sandbox record of each run after its end |
+| `run-job` | The run job, a Job from the template | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate only |
 | `sweep [--dry-run]` | The time limit of the sandboxes, a CronJob | Its own service account, with a Role in its own namespace: `sandboxes` (`agents.x-k8s.io`): `list`, `delete`. RBAC can't limit a `delete` to the run records; the code deletes only a run record that is older than the limit, and an admission policy can check the labels of the record on DELETE |
 
 ### Environment of `serve` (the agent, in the sandbox)
@@ -174,27 +174,34 @@ and `RUN_INPUT` only.
 | `OPENSHELL_MTLS_DIR` | The client certificate (`ca.crt`, `tls.crt`, `tls.key`), from the Secret. Default `/etc/openshell/mtls` |
 | `OPENSHELL_GATEWAY_NAME` | The name of the gateway in the CLI config. Default `workflows` |
 | `READY_TIMEOUT_SECONDS`, `RUN_TIMEOUT_SECONDS` | The wait for `/ping` (180) and for the answer (1800) |
-| `RECORD_WAIT_SECONDS` | The wait for the Sandbox record to go after the delete. Default 60 |
-| `KUBE_API_URL`, `POD_NAMESPACE` | Optional: the Kubernetes API and the namespace of the records. Default: those of the pod and its token |
 
 The run job prints one result line, `workflow-run-result: {...}`, as its last
 line on standard output; the receiver reads it from the pod log. Exit codes:
 0 the run succeeded, 1 the agent answered with an error, 2 the environment is
 not complete, 3 the sandbox did not start or answer, 4 no answer in time, 5
-the pod was stopped, 6 the sandbox was not deleted (when the run itself
-succeeded; a failed run keeps its own code). Each sandbox gets the
+the pod was stopped, 6 the sandbox was not deleted. Each sandbox gets the
 labels `workflow-run=true` and `workflow-agent=<name>`, and the name
 `run-<7 hex of the key>-<start time in base 36>` (OpenShell takes at most 19 characters).
 
-After the delete, the run job lists the Sandbox record of its sandbox
-(`agents.x-k8s.io`, labels `openshell.ai/managed-by=openshell` and
-`openshell.ai/sandbox-name=<name>`) until it is gone. The sandbox gateway
-can answer a delete, or "not found", with success and leave the record
-(OpenShell 0.1.8 did, and then forgot the sandbox). A record that is still
-there after `RECORD_WAIT_SECONDS`, or a record that can't be read, makes
-`sandbox_deleted` false, puts the reason in `sandbox_error`, and logs one
-line `ERROR run_job: sandbox <name>: ...`. The result keeps the answer of
-the agent, and the Job fails (exit 6). The sweep removes the record later.
+### The check of the Sandbox record
+
+The sandbox gateway can answer a delete with success and leave the Sandbox
+record (`agents.x-k8s.io`), and then forget the sandbox (OpenShell 0.1.8 did).
+So the run receiver checks the record of each run after its end. When a Job
+with a kept result ended at least `RUN_RECEIVER_SANDBOX_GRACE_SECONDS` ago,
+the receiver lists the records made by OpenShell (label
+`openshell.ai/managed-by=openshell`) and finds the one of the run: by the
+sandbox name in the kept result, or by the prefix of the key
+(`run-<7 hex>-`) when the result line was lost. It writes the annotation
+`workflow-agents/sandbox-record` on the Job, `gone` or `left: <sandbox>`,
+and `GET` shows it as `sandbox_record`. A record that is still there logs
+one line `ERROR run_receiver: run <job>: the Sandbox record of <sandbox> is
+still there ...`. The answer of the run does not change: the run job only
+sees what the gateway answered, so the result can still say
+`sandbox_deleted: true`. The sweep removes the record after its age limit,
+and its CronJob fails then, so the alert on a failed CronJob sees it. A
+failed list logs one `WARNING` line for each new error and leaves the Jobs
+for the next check.
 
 ### Environment of `run-receiver`
 
@@ -205,11 +212,13 @@ the agent, and the Job fails (exit 6). The sweep removes the record later.
 | `POD_NAMESPACE` | Its namespace, from the downward API. Each Job goes there |
 | `RUN_RECEIVER_MAX_INPUT_BYTES`, `RUN_RECEIVER_POLL_SECONDS` | Optional: 262144, and 2 |
 | `RUN_RECEIVER_RECORD_SECONDS` | Optional: the wait between two rounds of the loop that follows the runs no call started and keeps the results of ended Jobs. Default 10; `0` turns the loop off |
+| `RUN_RECEIVER_SANDBOX_GRACE_SECONDS` | Optional: the wait after the end of a run before the loop checks its Sandbox record. Default 60 |
 
 ### Environment of `sweep`
 
-`OPENSHELL_GATEWAY_URL`, `OPENSHELL_MTLS_DIR`, `OPENSHELL_GATEWAY_NAME`,
-`KUBE_API_URL` and `POD_NAMESPACE` as for the run job, `SWEEP_MAX_AGE_SECONDS`
+`OPENSHELL_GATEWAY_URL`, `OPENSHELL_MTLS_DIR` and `OPENSHELL_GATEWAY_NAME`
+as for the run job, `KUBE_API_URL` and `POD_NAMESPACE` (optional: by default
+those of the pod and its token), `SWEEP_MAX_AGE_SECONDS`
 (default 3600), and `SWEEP_DEADLINE_SECONDS` (default 420). Set the age above
 the `activeDeadlineSeconds` of each template plus its
 `terminationGracePeriodSeconds`, so that a record older than it belongs to no
@@ -224,7 +233,15 @@ of the record it read; a 404 counts as gone, a 409 leaves it for the next
 sweep). A record that the gateway left or forgot fails the sweep (exit 1)
 after its removal, with one `ERROR sweep:` line. The sweep starts no
 removal that its deadline has no time for, and fails with a line that says
-how many are left.
+how many are left. If the gateway list fails, the sweep fails, and each
+record is left to the age rule alone.
+
+The age of a record is the younger of two clocks: the start time in its
+name (the clock of the node of the run job) and its `creationTimestamp`
+(the clock of the API server), against the clock of the node of the sweep.
+A skew between them makes a record look younger or older by the skew only.
+Keep the margin between the age limit and the time limit of a run (3600 s
+against 2400 s and 90 s of grace in the example) far above any skew.
 
 ### The list of agents and the Job template
 
@@ -287,8 +304,8 @@ trace collector, the Kubernetes API and the OpenShell CLI are fakes in
 | --- | --- |
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
-| `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes, and the kept result when the pod is gone |
-| `test_run_job.py` | The whole run with a fake CLI and a fake API for the Sandbox records, the delete on each failure and on SIGTERM, a record that the gateway leaves, and the sweep through the gateway and through the API |
+| `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes, the kept result when the pod is gone, and the check of the Sandbox record after a run |
+| `test_run_job.py` | The whole run with a fake CLI and a fake API for the Sandbox records, the delete on each failure and on SIGTERM, and the sweep through the gateway and through the API, with a record that the gateway leaves or forgets |
 | `kind/test_on_kind.py` | CI only, on the host of the job: the whole run on a kind cluster (below) |
 
 ### The test cluster
@@ -313,9 +330,9 @@ at `litellm-app.ai`, the trace collector at `alloy.monitoring`, and GitHub in
    has the output.
 2. A second key for the same head is skipped: one comment for one head.
 3. A run job that gets SIGTERM in the middle of a run deletes its sandbox,
-   and the sweep (`--dry-run`) finds the sandbox by its label first. The run
-   job and the sweep read the Sandbox records of the real Agent Sandbox with
-   their own Roles.
+   and the sweep (`--dry-run`) finds the sandbox by its label first. The
+   receiver and the sweep read the Sandbox records of the real Agent Sandbox
+   with their own Roles.
 
 Each kubectl and helm call names the kubeconfig file of the test cluster.
 When a step fails, [`tests/kind/dump.sh`](tests/kind/dump.sh) prints the
