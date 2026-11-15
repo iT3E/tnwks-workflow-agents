@@ -549,6 +549,21 @@ class SandboxRecords(ReceiverTest):
         wait_until("check of the record", lambda: self.check(key))
         self.assertEqual(self.check(key), f"left: {sandbox}")
 
+    def test_a_record_with_the_key_prefix_that_is_not_a_run_record_is_not_matched(self):
+        key = "record-7"
+        prefix = names.key_prefix(key)
+        # OpenShell made them, and their names start with the prefix of the key,
+        # but they are not run names (a dash, or more than 7 characters after it).
+        for odd in (f"{prefix}probe-1", f"{prefix}abcdefgh"):
+            self.kube.sandboxes.append(fake_sandboxes.record(odd))
+        self.post(key=key, wait=False)
+        name = receiver_app.job_name(key)
+        self.kube.finish(name, log="")
+        self.kube.gc_pod(name)  # the result line is lost: the prefix finds the record
+        with self.assertNoLogs("run_receiver", level="ERROR"):
+            wait_until("check of the record", lambda: self.check(key))
+        self.assertEqual(self.check(key), "gone")
+
     def test_only_a_record_that_openshell_made_counts(self):
         key = "record-4"
         sandbox = names.sandbox_name(key, time.time())
