@@ -8,7 +8,9 @@ Steps (Design Doc 0003, appendix A.1, steps 3 to 6):
   4. Send the input in the body of POST /invocations.
   5. Print the answer as the result line, and delete the sandbox. The delete
      runs also when a step fails and when the pod gets SIGTERM, for example at
-     the time limit of the Job.
+     the time limit of the Job. The run job has no Kubernetes token: the run
+     receiver checks the Sandbox record after the end of the run, and the
+     sweep removes a record that the gateway left.
 
 The input goes in the body, never in a command argument (32 KiB) or in a
 sandbox variable (8 KiB). No credential goes into the sandbox: the providers
@@ -36,7 +38,6 @@ environment is not complete, 3 the sandbox did not start or answer /ping,
 6 the sandbox was not deleted.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -47,7 +48,7 @@ import time
 
 import httpx
 
-from run_job import result
+from run_job import names, result
 from run_job.openshell import OpenShell, OpenShellError
 
 log = logging.getLogger("run_job")
@@ -55,10 +56,11 @@ log = logging.getLogger("run_job")
 AGENT_COMMAND = ["python3", "/app/src/entrypoint.py", "serve"]
 ENV_PREFIX = "AGENT_ENV_"
 SECRET_WORDS = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE", re.IGNORECASE)
-# OpenShell 0.1.7 refuses a sandbox name longer than 19 characters (seen on
-# the kind cluster of CI): run-<7 hex>-<6 or 7 base36> is 18 or 19.
-MAX_NAME_LENGTH = 19
-NAME_PATTERN = re.compile(r"^run-[0-9a-f]{7}-[0-9a-z]{1,7}$")
+# The name of a run sandbox (names.py); the tests and the sweep read these here too.
+MAX_NAME_LENGTH = names.MAX_NAME_LENGTH
+NAME_PATTERN = names.NAME_PATTERN
+sandbox_name = names.sandbox_name
+started_at = names.started_at
 RUN_LABEL = "workflow-run"
 AGENT_LABEL = "workflow-agent"
 DELETE_ATTEMPTS = 3
@@ -70,27 +72,6 @@ class ConfigError(ValueError):
 
 class Stopped(Exception):
     pass
-
-
-def base36(n: int) -> str:
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    out = ""
-    while True:
-        n, r = divmod(n, 36)
-        out = digits[r] + out
-        if n == 0:
-            return out
-
-
-def sandbox_name(key: str, now: float) -> str:
-    """run-<7 hex of the key>-<start time in base 36>. The sweep reads the time back from it."""
-    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:7]}-{base36(int(now))}"
-
-
-def started_at(name: str) -> int | None:
-    if not NAME_PATTERN.match(name):
-        return None
-    return int(name.rsplit("-", 1)[1], 36)
 
 
 def agent_env(environ: dict[str, str], agent: str) -> dict[str, str]:

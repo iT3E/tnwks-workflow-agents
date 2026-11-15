@@ -1,6 +1,7 @@
 """A fake of the Kubernetes API calls of the run receiver: Jobs, their pods and the pod log.
 
-A test ends a Job with `finish(name, condition, reason, log)`, and deletes its
+It also lists Sandbox records (`sandboxes`, a list a test fills, or a status
+code in `refuse_sandboxes`). A test ends a Job with `finish(name, condition, reason, log)`, and deletes its
 pod with `gc_pod(name)`, as the pod GC of a cluster does. A merge patch of a
 Job sets its annotations, unless `refuse_patch` holds a status code (as an
 admission policy that refuses it). The fake keeps each request, so a test can
@@ -25,6 +26,8 @@ class FakeKube:
         self.refuse_patch: int | None = None
         self.pod_phase = "Succeeded"  # the phase that finish() gives the pod
         self.phases: dict[str, str] = {}
+        self.sandboxes: list[dict] = []
+        self.refuse_sandboxes: int | None = None
         self.lock = threading.Lock()
         self.server = Server(self.app)
 
@@ -120,6 +123,15 @@ class FakeKube:
                     return 404, {"kind": "Status", "code": 404}, None
                 job["metadata"].setdefault("annotations", {}).update(patch["metadata"]["annotations"])
             return 200, job, None
+        m = re.match(r"^/apis/agents\.x-k8s\.io/v1beta1/namespaces/([^/]+)/sandboxes$", p)
+        if m and method == "GET":
+            if self.refuse_sandboxes:
+                return self.refuse_sandboxes, {"kind": "Status", "code": self.refuse_sandboxes}, None
+            terms = [t for t in query.get("labelSelector", [""])[0].split(",") if t]
+            want = dict(t.split("=", 1) for t in terms)
+            with self.lock:
+                items = [r for r in self.sandboxes if all(r["metadata"]["labels"].get(k) == v for k, v in want.items())]
+            return 200, {"items": json.loads(json.dumps(items))}, None
         m = re.match(r"^/api/v1/namespaces/([^/]+)/pods$", p)
         if m and method == "GET":
             selector = query.get("labelSelector", [""])[0]

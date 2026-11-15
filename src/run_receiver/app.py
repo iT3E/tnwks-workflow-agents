@@ -22,14 +22,28 @@ annotation workflow-agents/result of the Job, and a later call reads the
 annotation. When the receiver was down for the whole end of a run, the
 answer is the state of the Job, with "output_kept": false.
 
+The run job deletes its sandbox through the sandbox gateway, and the gateway
+can answer a delete with success and leave the Sandbox record (OpenShell
+0.1.8 did, and then forgot the sandbox). The run job has no Kubernetes token,
+so the receiver checks: once for each ended run, RUN_RECEIVER_SANDBOX_GRACE_SECONDS
+after its end, it lists the Sandbox records of the run, by the sandbox name in
+the result, or by the prefix of the run key when the result is gone. It keeps
+"gone" or "left: <sandbox>" in the annotation workflow-agents/sandbox-record
+of the Job, and logs one ERROR line for a record that stays. The answer of the
+run does not change: a call gets the same status and output, and
+"sandbox_record". The sweep removes the record after its age limit, and
+fails once for it.
+
 Environment:
     RUN_RECEIVER_TOKEN            the token of the callers, at least 32 characters
     RUN_RECEIVER_CONFIG           the list of agents. Default /etc/run-receiver/agents.yaml
     RUN_RECEIVER_MAX_INPUT_BYTES  the largest input, as JSON. Default 262144
     RUN_RECEIVER_POLL_SECONDS     the wait between two reads of a Job. Default 2
     RUN_RECEIVER_RECORD_SECONDS   the wait between two rounds of the loop that follows the
-                                  runs no call started and keeps the results of ended
-                                  Jobs. Default 10; 0 turns it off
+                                  runs no call started, keeps the results of ended
+                                  Jobs and checks their Sandbox records. Default 10; 0 turns it off
+    RUN_RECEIVER_SANDBOX_GRACE_SECONDS  the time after the end of a run before the check of its
+                                  Sandbox record. Default 60
     POD_NAMESPACE                 the namespace of the receiver and its Jobs
 """
 
@@ -44,11 +58,13 @@ import sys
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from run_job import result
+from run_job import names, result
+from run_job.records import MANAGED_BY, is_run_record, sandbox_of
 from run_receiver import config
 from run_receiver.kube import Kube, KubeError, container_started, own_namespace, pod_ended
 
@@ -61,6 +77,9 @@ WAIT_MARGIN_SECONDS = 60
 MIN_TOKEN_LENGTH = 32
 AGENT_LABEL = "workflow-agents/agent"
 RESULT_ANNOTATION = "workflow-agents/result"
+KEY_ANNOTATION = "workflow-agents/run-key"
+# "gone", or "left: <sandbox>": the check of the Sandbox record after the end of a run.
+SANDBOX_ANNOTATION = "workflow-agents/sandbox-record"
 # The kept result is at most 64 KiB: the annotations of an object have 256 KiB
 # in all. A larger result is kept without its output.
 RESULT_MAX_BYTES = 65536
@@ -94,6 +113,42 @@ def job_state(job: dict) -> str:
     return result.RUNNING
 
 
+def ended_at(job: dict) -> float | None:
+    """The time the Job ended, from its status, or None when the status has no time."""
+    status = job.get("status") or {}
+    stamps = [status.get("completionTime")]
+    stamps += [
+        c.get("lastTransitionTime")
+        for c in status.get("conditions") or []
+        if c.get("type") in ("Complete", "Failed") and c.get("status") == "True"
+    ]
+    for stamp in stamps:
+        if stamp:
+            try:
+                return datetime.fromisoformat(stamp).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def records_of_run(job: dict, records: list[dict]) -> list[str]:
+    """The sandboxes of the run of this Job that still have a Sandbox record: by the
+    sandbox name in the kept result, or by the prefix of the run key."""
+    meta = job.get("metadata") or {}
+    kept = kept_result(job) or {}
+    exact = kept.get("sandbox") if isinstance(kept.get("sandbox"), str) else ""
+    key = (meta.get("annotations") or {}).get(KEY_ANNOTATION, "")
+    prefix = names.key_prefix(key) if key else ""
+    found = []
+    for record in records:
+        if not is_run_record(record):
+            continue
+        sandbox = sandbox_of(record)
+        if (exact and sandbox == exact) or (not exact and prefix and sandbox.startswith(prefix)):
+            found.append(sandbox)
+    return sorted(found)
+
+
 def kept_result(job: dict | None) -> dict | None:
     """The result kept in the annotation of the Job, or None."""
     kept = (((job or {}).get("metadata") or {}).get("annotations") or {}).get(RESULT_ANNOTATION)
@@ -117,6 +172,7 @@ class Receiver:
         poll_seconds: float = 2.0,
         record_seconds: float = 10.0,
         follow_wait_seconds: float = 30.0,
+        sandbox_grace_seconds: float = 60.0,
     ):
         if len(token) < MIN_TOKEN_LENGTH:
             raise config.ConfigError(f"the token must have at least {MIN_TOKEN_LENGTH} characters")
@@ -128,7 +184,10 @@ class Receiver:
         self.poll_seconds = poll_seconds
         self.record_seconds = record_seconds
         self.follow_wait_seconds = follow_wait_seconds
+        self.sandbox_grace_seconds = sandbox_grace_seconds
         self._record_error = ""
+        self._sandbox_error = ""
+        self._seen_ended: dict[str, float] = {}
         self.followers: dict[str, asyncio.Task] = {}
         self.results: OrderedDict[str, dict] = OrderedDict()
 
@@ -245,6 +304,9 @@ class Receiver:
         body["status"] = status
         if found.get("output_kept") is False:
             body["output_kept"] = False
+        sandbox_record = ((job.get("metadata") or {}).get("annotations") or {}).get(SANDBOX_ANNOTATION)
+        if sandbox_record:
+            body["sandbox_record"] = sandbox_record
         if status == result.SUCCEEDED:
             if not gone and "output_kept" not in body:
                 body["output"] = found.get("output")
@@ -273,6 +335,50 @@ class Receiver:
             count += 1
         return count
 
+    async def check_sandboxes(self) -> int:
+        """One round: check the Sandbox records of each run that ended at least
+        sandbox_grace_seconds ago, has a kept result, and has no check yet."""
+        due = []
+        now = time.time()
+        jobs = await self.kube.list_jobs(self.namespace, AGENT_LABEL)
+        listed = {str((job.get("metadata") or {}).get("name", "")) for job in jobs}
+        for gone in set(self._seen_ended) - listed:
+            del self._seen_ended[gone]
+        for job in jobs:
+            meta = job.get("metadata") or {}
+            name = str(meta.get("name", ""))
+            annotations = meta.get("annotations") or {}
+            if not name.startswith("run-") or job_state(job) == result.RUNNING:
+                continue
+            if SANDBOX_ANNOTATION in annotations or RESULT_ANNOTATION not in annotations:
+                continue
+            end = ended_at(job) or self._seen_ended.setdefault(name, now)
+            if now - end >= self.sandbox_grace_seconds:
+                due.append((job, now - end))
+        if not due:
+            return 0
+        records = await self.kube.list_sandboxes(self.namespace, f"{MANAGED_BY}=openshell")
+        for job, age in due:
+            name = job["metadata"]["name"]
+            left = records_of_run(job, records)
+            value = f"left: {', '.join(left)}" if left else "gone"
+            if left:
+                deleted = (kept_result(job) or {}).get("sandbox_deleted")
+                log.error(
+                    "run %s: the Sandbox record of %s is still there %.0f s after the run ended "
+                    "(sandbox_deleted in its result: %s); the sweep removes it after its age limit",
+                    name,
+                    ", ".join(left),
+                    age,
+                    "unknown" if deleted is None else str(deleted).lower(),
+                )
+            try:
+                await self.kube.annotate_job(self.namespace, name, {SANDBOX_ANNOTATION: value})
+            except KubeError as e:
+                log.warning("run %s: the check of the Sandbox record is not kept: %s", name, e)
+            self._seen_ended.pop(name, None)
+        return len(due)
+
     async def keep_loop(self) -> None:
         while True:
             try:
@@ -282,6 +388,13 @@ class Receiver:
                 if str(e) != self._record_error:  # one line for each new error, not one each round
                     log.warning("the loop that keeps the results: %s", e)
                 self._record_error = str(e)
+            try:
+                await self.check_sandboxes()
+                self._sandbox_error = ""
+            except KubeError as e:
+                if str(e) != self._sandbox_error:
+                    log.warning("the check of the Sandbox records: %s", e)
+                self._sandbox_error = str(e)
             await asyncio.sleep(self.record_seconds)
 
     async def wait(self, name: str, until: float) -> dict | None:
@@ -423,6 +536,7 @@ def main() -> int:
             max_input_bytes=int(os.environ.get("RUN_RECEIVER_MAX_INPUT_BYTES", "262144")),
             poll_seconds=float(os.environ.get("RUN_RECEIVER_POLL_SECONDS", "2")),
             record_seconds=float(os.environ.get("RUN_RECEIVER_RECORD_SECONDS", "10")),
+            sandbox_grace_seconds=float(os.environ.get("RUN_RECEIVER_SANDBOX_GRACE_SECONDS", "60")),
         )
     except (OSError, config.ConfigError, KubeError) as e:
         print(f"run-receiver: {e}", file=sys.stderr)

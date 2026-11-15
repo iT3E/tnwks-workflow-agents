@@ -6,6 +6,8 @@
     PATCH /apis/batch/v1/namespaces/{ns}/jobs/{name}           patch    jobs (an annotation only)
     GET   /api/v1/namespaces/{ns}/pods?labelSelector=...       list     pods
     GET   /api/v1/namespaces/{ns}/pods/{name}/log              get      pods/log (also with follow=true)
+    GET   /apis/agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxes?labelSelector=
+                                                               list     sandboxes (agents.x-k8s.io)
 
 In a pod, the client uses the service account token and CA of the pod. The
 token file is read again for each call, because Kubernetes rotates it.
@@ -91,6 +93,15 @@ class Kube:
         r = await self._call("GET", f"/apis/batch/v1/namespaces/{namespace}/jobs", params={"labelSelector": selector})
         if r.status_code >= 300:
             raise KubeError(f"list jobs: {r.status_code}")
+        return r.json().get("items") or []
+
+    async def list_sandboxes(self, namespace: str, selector: str) -> list[dict]:
+        """The Sandbox records of the namespace with these labels."""
+        r = await self._call(
+            "GET", f"/apis/agents.x-k8s.io/v1beta1/namespaces/{namespace}/sandboxes", params={"labelSelector": selector}
+        )
+        if r.status_code >= 300:
+            raise KubeError(f"list sandboxes: {r.status_code}")
         return r.json().get("items") or []
 
     async def annotate_job(self, namespace: str, name: str, annotations: dict[str, str]) -> None:

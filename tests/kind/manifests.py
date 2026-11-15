@@ -11,8 +11,10 @@ Usage:
   collector have the service names of the platform, so that the examples work
   as they are: litellm-app in `ai`, alloy in `monitoring`.
 - setup: the Job that imports the provider profiles and makes the providers.
-- receiver: the run receiver as tnwks-ops runs it, with its Role, the service
-  account of the run jobs, the token, the list of agents and the sandbox policy.
+- receiver: the run receiver as tnwks-ops runs it, with its Role (with the
+  list of Sandbox records), the service account of the run jobs (no token),
+  the service account of the sweep with its Role, the token, the list of
+  agents and the sandbox policy.
 
 The test values come from tests/support. It uses the standard library only.
 """
@@ -188,6 +190,7 @@ def receiver(image: str, agents_file: str, token: str) -> list:
             {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "list", "patch"]},
             {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
             {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+            {"apiGroups": ["agents.x-k8s.io"], "resources": ["sandboxes"], "verbs": ["list"]},
         ],
     }
     binding = {
@@ -204,8 +207,26 @@ def receiver(image: str, agents_file: str, token: str) -> list:
             "metadata": {"name": name, "namespace": ns},
             "automountServiceAccountToken": False,
         }
-        for name in ("run-receiver", "workflow-run")
+        for name in ("run-receiver", "workflow-run", "workflow-sweep")
     ]
+    # The sweep also removes a run record that the gateway left or forgot.
+    record_roles = []
+    for name, verbs in (("workflow-sweep", ["list", "delete"]),):
+        record_roles += [
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": name, "namespace": ns},
+                "rules": [{"apiGroups": ["agents.x-k8s.io"], "resources": ["sandboxes"], "verbs": verbs}],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": name, "namespace": ns},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+                "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": ns}],
+            },
+        ]
     secret = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -220,6 +241,7 @@ def receiver(image: str, agents_file: str, token: str) -> list:
         env=[
             {"name": "RUN_RECEIVER_TOKEN", "valueFrom": {"secretKeyRef": {"name": TOKEN_SECRET, "key": "token"}}},
             {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+            {"name": "RUN_RECEIVER_SANDBOX_GRACE_SECONDS", "value": "10"},
         ],
         ports=[{"containerPort": 8080}],
         readinessProbe={"httpGet": {"path": "/healthz", "port": 8080}, "periodSeconds": 2},
@@ -231,6 +253,7 @@ def receiver(image: str, agents_file: str, token: str) -> list:
         *accounts,
         role,
         binding,
+        *record_roles,
         secret,
         config_map("run-receiver-agents", ns, {"agents.yaml": Path(agents_file).read_text()}),
         config_map(
@@ -260,8 +283,8 @@ def sweep(image: str, name: str, max_age: int, dry_run: bool) -> dict:
             "template": {
                 "spec": {
                     "restartPolicy": "Never",
-                    "serviceAccountName": "workflow-run",
-                    "automountServiceAccountToken": False,
+                    "serviceAccountName": "workflow-sweep",
+                    "automountServiceAccountToken": True,
                     "securityContext": POD_SECURITY,
                     "containers": [c],
                     "volumes": [MTLS, TMP],
