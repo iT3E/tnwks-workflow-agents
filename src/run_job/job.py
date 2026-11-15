@@ -9,6 +9,11 @@ Steps (Design Doc 0003, appendix A.1, steps 3 to 6):
   5. Print the answer as the result line, and delete the sandbox. The delete
      runs also when a step fails and when the pod gets SIGTERM, for example at
      the time limit of the Job.
+  6. Read the Sandbox record of the sandbox through the Kubernetes API, until
+     it is gone. The gateway can answer a delete with success and leave the
+     record (OpenShell 0.1.8), so its answer alone is not the end of the
+     sandbox. A record that stays fails the run job (exit 6); the sweep
+     removes the record later.
 
 The input goes in the body, never in a command argument (32 KiB) or in a
 sandbox variable (8 KiB). No credential goes into the sandbox: the providers
@@ -26,6 +31,8 @@ Environment (the Job template of each agent sets them; the run receiver adds RUN
     OPENSHELL_GATEWAY_URL       the sandbox gateway, https://<service>.<namespace>.svc.cluster.local:8080
     OPENSHELL_MTLS_DIR          the client certificate: ca.crt, tls.crt, tls.key. Default /etc/openshell/mtls
     OPENSHELL_GATEWAY_NAME      the name of the gateway for the CLI. Default workflows
+    RECORD_WAIT_SECONDS         the wait for the Sandbox record to go after the delete. Default 60
+    KUBE_API_URL, POD_NAMESPACE optional: the Kubernetes API and the namespace. Default: those of the pod
     READY_TIMEOUT_SECONDS       the wait for GET /ping. Default 180
     RUN_TIMEOUT_SECONDS         the wait for the answer. Default 1800
     SANDBOX_PORT                the contract port. Default 8080
@@ -33,10 +40,10 @@ Environment (the Job template of each agent sets them; the run receiver adds RUN
 Exit codes: 0 the run succeeded, 1 the agent answered with an error, 2 the
 environment is not complete, 3 the sandbox did not start or answer /ping,
 4 the run took more than RUN_TIMEOUT_SECONDS, 5 the pod was stopped,
-6 the sandbox was not deleted.
+6 the sandbox was not deleted, or its Sandbox record stayed (when the run
+itself succeeded; else the code of the failure of the run).
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -47,18 +54,20 @@ import time
 
 import httpx
 
-from run_job import result
+from run_job import names, result
 from run_job.openshell import OpenShell, OpenShellError
+from run_job.records import RecordError, Records
 
 log = logging.getLogger("run_job")
 
 AGENT_COMMAND = ["python3", "/app/src/entrypoint.py", "serve"]
 ENV_PREFIX = "AGENT_ENV_"
 SECRET_WORDS = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE", re.IGNORECASE)
-# OpenShell 0.1.7 refuses a sandbox name longer than 19 characters (seen on
-# the kind cluster of CI): run-<7 hex>-<6 or 7 base36> is 18 or 19.
-MAX_NAME_LENGTH = 19
-NAME_PATTERN = re.compile(r"^run-[0-9a-f]{7}-[0-9a-z]{1,7}$")
+# The name of a run sandbox (names.py); the tests and the sweep read these here too.
+MAX_NAME_LENGTH = names.MAX_NAME_LENGTH
+NAME_PATTERN = names.NAME_PATTERN
+sandbox_name = names.sandbox_name
+started_at = names.started_at
 RUN_LABEL = "workflow-run"
 AGENT_LABEL = "workflow-agent"
 DELETE_ATTEMPTS = 3
@@ -70,27 +79,6 @@ class ConfigError(ValueError):
 
 class Stopped(Exception):
     pass
-
-
-def base36(n: int) -> str:
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    out = ""
-    while True:
-        n, r = divmod(n, 36)
-        out = digits[r] + out
-        if n == 0:
-            return out
-
-
-def sandbox_name(key: str, now: float) -> str:
-    """run-<7 hex of the key>-<start time in base 36>. The sweep reads the time back from it."""
-    return f"run-{hashlib.sha256(key.encode()).hexdigest()[:7]}-{base36(int(now))}"
-
-
-def started_at(name: str) -> int | None:
-    if not NAME_PATTERN.match(name):
-        return None
-    return int(name.rsplit("-", 1)[1], 36)
 
 
 def agent_env(environ: dict[str, str], agent: str) -> dict[str, str]:
@@ -141,6 +129,7 @@ class Config:
         self.ready_timeout = float(environ.get("READY_TIMEOUT_SECONDS", "180"))
         self.run_timeout = float(environ.get("RUN_TIMEOUT_SECONDS", "1800"))
         self.port = int(environ.get("SANDBOX_PORT", "8080"))
+        self.record_wait = float(environ.get("RECORD_WAIT_SECONDS", "60"))
 
 
 def wait_ready(base: str, timeout: float) -> None:
@@ -167,7 +156,7 @@ def invoke(base: str, payload: dict, timeout: float) -> tuple[int, dict]:
     return r.status_code, body if isinstance(body, dict) else {"error": "the answer is not a JSON object"}
 
 
-def run(cfg: Config, cli: OpenShell, now: float) -> tuple[int, dict]:
+def run(cfg: Config, cli: OpenShell, now: float, records: Records | None = None) -> tuple[int, dict]:
     name = sandbox_name(cfg.key, now)
     base = f"http://127.0.0.1:{cfg.port}"
     out: dict = {"run_key": cfg.key, "agent": cfg.agent, "sandbox": name}
@@ -207,32 +196,66 @@ def run(cfg: Config, cli: OpenShell, now: float) -> tuple[int, dict]:
         code, out["status"], out["error"] = 3, result.FAILED, str(e)[:900]
     finally:
         if made:
-            out["sandbox_deleted"] = cleanup(cli, cfg.port, name)
-            if not out["sandbox_deleted"] and code == 0:
+            deleted, problem = cleanup(cli, cfg.port, name, records, cfg.record_wait)
+            out["sandbox_deleted"] = deleted
+            if problem:
+                out["sandbox_error"] = problem
+            if not deleted and code == 0:
                 code = 6
     out["seconds"] = round(time.time() - now, 1)
     return code, out
 
 
-def cleanup(cli: OpenShell, port: int, name: str) -> bool:
-    """Stop the forward and delete the sandbox. A second SIGTERM must not stop this."""
+def cleanup(cli: OpenShell, port: int, name: str, records: Records | None, record_wait: float) -> tuple[bool, str]:
+    """Stop the forward, delete the sandbox, and check that its Sandbox record is gone.
+
+    Returns (deleted, problem). The sandbox counts as deleted only when the
+    Kubernetes API has no record of it: the gateway can answer a delete (or
+    "not found") with success and leave the record. A second SIGTERM must not
+    stop this.
+    """
     previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         cli.forward_stop(port, name)
+        answered = False
         for attempt in range(1, DELETE_ATTEMPTS + 1):
             try:
                 cli.delete(name)
-                log.info("sandbox %s deleted", name)
-                return True
+                log.info("sandbox %s: the gateway deleted it", name)
+                answered = True
+                break
             except OpenShellError as e:
                 if "not found" in str(e).lower():
-                    log.info("sandbox %s is not there", name)
-                    return True
+                    log.info("sandbox %s: the gateway does not know it", name)
+                    answered = True
+                    break
                 log.error("delete of %s, attempt %d: %s", name, attempt, e)
                 time.sleep(2 * attempt)
-        return False
+        if not answered:
+            return False, "the gateway did not delete the sandbox"
+        return record_gone(name, records, record_wait)
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+def record_gone(name: str, records: Records | None, wait: float) -> tuple[bool, str]:
+    """Read the Sandbox record of the sandbox until it is gone, at most `wait` seconds."""
+    try:
+        records = records or Records()
+        gone = records.wait_gone(name, wait)
+    except RecordError as e:
+        problem = f"the Sandbox record could not be read after the delete: {e}"
+        log.error("sandbox %s: %s", name, problem)
+        return False, problem
+    if not gone:
+        problem = (
+            f"the Sandbox record is still there {wait:.0f} s after the gateway answered the delete; "
+            "the sweep removes it"
+        )
+        log.error("sandbox %s: %s", name, problem)
+        return False, problem
+    log.info("sandbox %s deleted: its Sandbox record is gone", name)
+    return True, ""
 
 
 def _stop(signum, frame):

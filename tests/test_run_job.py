@@ -24,10 +24,11 @@ import unittest
 from pathlib import Path
 
 import support  # noqa: F401  (sets the import path)
-from support import EXAMPLES, HERE, Process, base_env, fake_github, mock_model
+from run_job import job, records, result, sweep
+from run_job.openshell import OpenShell
+from support import EXAMPLES, HERE, Process, base_env, fake_github, fake_sandboxes, mock_model
 from support.cases import RenovateReviewerCase
-
-from run_job import job, result
+from support.fake_sandboxes import FakeSandboxes
 
 FAKE_CLI = os.path.join(HERE, "fake_openshell.py")
 
@@ -71,6 +72,12 @@ class RunJobLocal(unittest.TestCase):
         cli = self.tmp / "openshell"
         cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" "$@"\n')
         cli.chmod(0o755)
+        self.cli_path = str(cli)
+        self.token_file = self.tmp / "token"
+        self.token_file.write_text(fake_sandboxes.TOKEN)
+        self.api = FakeSandboxes(self.state)
+        self.api.__enter__()
+        self.addCleanup(self.api.__exit__, None, None, None)
         self.case = RenovateReviewerCase()
         self.ctx = self.case.running()
         self.ctx.__enter__()
@@ -96,6 +103,10 @@ class RunJobLocal(unittest.TestCase):
             FAKE_OPENSHELL_STATE=str(self.state),
             FAKE_PROVIDER_MODEL_GATEWAY_KEY=mock_model.KEY,
             FAKE_PROVIDER_GITHUB_TOKEN=fake_github.TOKEN,
+            KUBE_API_URL=self.api.url,
+            KUBE_TOKEN_FILE=str(self.token_file),
+            POD_NAMESPACE=fake_sandboxes.NAMESPACE,
+            RECORD_WAIT_SECONDS="5",
         )
 
     def tearDown(self):
@@ -128,7 +139,10 @@ class RunJobLocal(unittest.TestCase):
         self.assertEqual(res["status"], "succeeded")
         self.assertEqual(res["output"]["status"], "reviewed")
         self.assertTrue(res["sandbox_deleted"])
+        self.assertNotIn("sandbox_error", res)
         self.assertEqual(self.sandboxes_left(), [])
+        self.assertEqual(self.api.names(), [])
+        self.assertIn(f"sandbox {res['sandbox']} deleted: its Sandbox record is gone", err)
         self.assertEqual(len(self.case.github.writes()), 1)
 
         create = next(c for c in self.calls() if "create" in c)
@@ -174,6 +188,52 @@ class RunJobLocal(unittest.TestCase):
         self.assertEqual(res["status"], "succeeded")
         self.assertFalse(res["sandbox_deleted"])
 
+    def test_a_record_that_the_gateway_leaves_after_its_delete_fails_the_job(self):
+        # OpenShell 0.1.8: the delete answers success, the gateway forgets the sandbox, the record stays.
+        code, res, err = self.run_job(FAKE_OPENSHELL_MODE="delete-keeps-record", RECORD_WAIT_SECONDS="2")
+        self.assertEqual(code, 6, err[-3000:])
+        self.assertEqual(res["status"], "succeeded")  # the run itself worked, and its answer stays
+        self.assertFalse(res["sandbox_deleted"])
+        self.assertIn("still there 2 s after the gateway answered the delete", res["sandbox_error"])
+        self.assertIn(f"ERROR run_job: sandbox {res['sandbox']}: the Sandbox record is still there", err)
+        self.assertEqual(self.sandboxes_left(), [])  # the gateway does not know it any more
+        self.assertEqual(self.api.names(), [f"default--{res['sandbox']}"])
+
+    def test_a_record_that_the_gateway_forgot_before_the_delete_fails_the_job(self):
+        # The delete answers "not found", which the run job took as gone before.
+        code, res, err = self.run_job(FAKE_OPENSHELL_MODE="forgot-before-delete", RECORD_WAIT_SECONDS="2")
+        self.assertEqual(code, 6, err[-3000:])
+        self.assertFalse(res["sandbox_deleted"])
+        self.assertIn("the gateway does not know it", err)
+        self.assertIn("still there", res["sandbox_error"])
+
+    def test_a_failed_run_keeps_its_own_exit_code_when_the_record_stays(self):
+        code, res, _ = self.run_job(
+            FAKE_OPENSHELL_MODE="delete-keeps-record no-serve", READY_TIMEOUT_SECONDS="2", RECORD_WAIT_SECONDS="1"
+        )
+        self.assertEqual(code, 3)
+        self.assertFalse(res["sandbox_deleted"])
+        self.assertIn("still there", res["sandbox_error"])
+
+    def test_a_record_in_deletion_that_goes_within_the_wait_passes(self):
+        code, res, err = self.run_job(FAKE_OPENSHELL_MODE="record-goes-slowly", RECORD_WAIT_SECONDS="30")
+        self.assertEqual(code, 0, err[-3000:])
+        self.assertTrue(res["sandbox_deleted"])
+        self.assertEqual(self.api.names(), [])
+
+    def test_a_record_that_cannot_be_read_fails_the_job(self):
+        self.api.fail_with = 403  # no right to list Sandbox records
+        code, res, err = self.run_job()
+        self.assertEqual(code, 6, err[-3000:])
+        self.assertFalse(res["sandbox_deleted"])
+        self.assertIn("could not be read after the delete", res["sandbox_error"])
+        self.assertIn("HTTP 403", res["sandbox_error"])
+
+    def test_no_token_fails_the_job_with_a_clear_line(self):
+        code, res, _ = self.run_job(KUBE_TOKEN_FILE=str(self.tmp / "no-such-token"))
+        self.assertEqual(code, 6)
+        self.assertIn("no service account token", res["sandbox_error"])
+
     def test_sigterm_deletes_the_sandbox(self):
         proc = Process(["run-job"], self.env | {"FAKE_OPENSHELL_MODE": "no-serve", "READY_TIMEOUT_SECONDS": "60"})
         deadline = time.monotonic() + 30
@@ -188,6 +248,7 @@ class RunJobLocal(unittest.TestCase):
         self.assertEqual(res["error"], "the run job was stopped")
         self.assertTrue(res["sandbox_deleted"])
         self.assertEqual(self.sandboxes_left(), [])
+        self.assertEqual(self.api.names(), [])
 
     def test_a_missing_variable_is_a_config_error_before_any_sandbox(self):
         code, res, _ = self.run_job(SANDBOX_IMAGE="")
@@ -195,23 +256,176 @@ class RunJobLocal(unittest.TestCase):
         self.assertIn("SANDBOX_IMAGE", res["error"])
         self.assertEqual(self.calls(), [])
 
+    def gateway_sandbox(self, name: str, created: float) -> None:
+        """A sandbox that the gateway knows, with its record."""
+        sleeper = subprocess.Popen(["sleep", "600"], start_new_session=True)
+        self.addCleanup(lambda: (sleeper.kill(), sleeper.wait()))
+        (self.state / f"{name}.pid").write_text(str(sleeper.pid))
+        self.api.add(fake_sandboxes.record(name, created))
+
+    def sweep(self, *args, **env) -> tuple[int, str]:
+        proc = Process(["sweep", *args], self.env | {"SWEEP_MAX_AGE_SECONDS": "3600"} | env)
+        proc.proc.wait(timeout=120)
+        _, err = proc.stop()
+        return proc.proc.returncode, err
+
     def test_the_sweep_deletes_old_run_sandboxes_only(self):
         now = int(time.time())
         old = job.sandbox_name("old-run", now - 7200)
         fresh = job.sandbox_name("fresh-run", now - 60)
-        self.state.mkdir(parents=True, exist_ok=True)
-        sleepers = []
-        for name in (old, fresh):
-            sleepers.append(subprocess.Popen(["sleep", "600"], start_new_session=True))
-            (self.state / f"{name}.pid").write_text(str(sleepers[-1].pid))
-        self.addCleanup(lambda: [(s.kill(), s.wait()) for s in sleepers])
-        proc = Process(["sweep"], self.env | {"SWEEP_MAX_AGE_SECONDS": "3600", "FAKE_OPENSHELL_EXTRA": "someone-elses"})
-        proc.proc.wait(timeout=60)
-        proc.stop()
-        self.assertEqual(proc.proc.returncode, 0)
+        self.gateway_sandbox(old, now - 7200)
+        self.gateway_sandbox(fresh, now - 60)
+        code, err = self.sweep(FAKE_OPENSHELL_EXTRA="someone-elses")
+        self.assertEqual(code, 0, err[-3000:])
         self.assertEqual(sorted(self.sandboxes_left()), [fresh])
         deletes = [c[-1] for c in self.calls() if "delete" in c]
         self.assertEqual(deletes, [old])
+        self.assertEqual(self.api.names(), [f"default--{fresh}"])
+        self.assertEqual(self.api.deletes(), [])  # the gateway removed the record: no call to the API
+
+    def test_the_sweep_removes_a_record_that_its_gateway_delete_left(self):
+        now = int(time.time())
+        old = job.sandbox_name("old-run", now - 7200)
+        self.gateway_sandbox(old, now - 7200)
+        code, err = self.sweep(FAKE_OPENSHELL_MODE="delete-keeps-record")
+        self.assertEqual(code, 1, err[-3000:])
+        self.assertIn(f"{old}: the gateway answered the delete and left the Sandbox record; removed", err)
+        self.assertEqual(self.api.names(), [])
+        [call] = self.api.deletes()
+        self.assertTrue(call["path"].endswith(f"/sandboxes/default--{old}"))
+        self.assertEqual(call["body"]["propagationPolicy"], "Foreground")
+        self.assertIn("uid", call["body"]["preconditions"])
+
+    def test_the_sweep_removes_old_records_that_the_gateway_does_not_list_and_nothing_else(self):
+        now = time.time()
+        forgotten = job.sandbox_name("forgotten-run", now - 7200)
+        young = job.sandbox_name("young-run", now - 60)  # the gateway does not list it yet: a live run
+        new_record_old_name = job.sandbox_name("odd-run", now - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, now - 7200))
+        self.api.add(fake_sandboxes.record(young, now - 60))
+        self.api.add(fake_sandboxes.record(new_record_old_name, now - 60))  # young by its creationTimestamp
+        self.api.add(fake_sandboxes.record("platform-probe", now - 7200))  # not a run name
+        other = job.sandbox_name("other-run", now - 7200)
+        labels = {"openshell.ai/sandbox-name": other, "openshell.ai/managed-by": "someone-else"}
+        self.api.add(fake_sandboxes.record(other, now - 7200, labels=labels))  # not made by OpenShell
+        code, err = self.sweep()
+        self.assertEqual(code, 1, err[-3000:])  # the gateway lost a sandbox: the alert shows it
+        self.assertIn(f"{forgotten}: a Sandbox record that the gateway does not list; removed through the API", err)
+        self.assertEqual(
+            self.api.names(),
+            sorted(
+                [f"default--{young}", f"default--{new_record_old_name}", "default--platform-probe", f"default--{other}"]
+            ),
+        )
+        self.assertEqual(len(self.api.deletes()), 1)
+
+    def test_the_sweep_takes_a_404_between_the_read_and_the_delete_as_gone(self):
+        forgotten = job.sandbox_name("forgotten-run", time.time() - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, time.time() - 7200))
+        self.api.delete_answer = 404
+        code, err = self.sweep()
+        self.assertEqual(code, 1)  # forgotten by the gateway, so the sweep still fails once
+        self.assertIn("removed through the API", err)
+        self.assertNotIn("not removed", err)
+        self.assertEqual(self.api.names(), [])
+
+    def test_the_sweep_leaves_a_record_that_changed_since_its_read(self):
+        forgotten = job.sandbox_name("forgotten-run", time.time() - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, time.time() - 7200))
+        self.api.delete_answer = 409
+        code, err = self.sweep()
+        self.assertEqual(code, 1)
+        self.assertIn("changed between its read and its delete (409); left for the next sweep", err)
+        self.assertEqual(self.api.names(), [f"default--{forgotten}"])
+
+    def test_the_sweep_in_a_dry_run_removes_nothing(self):
+        now = time.time()
+        old = job.sandbox_name("old-run", now - 7200)
+        forgotten = job.sandbox_name("forgotten-run", now - 7200)
+        self.gateway_sandbox(old, now - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, now - 7200))
+        code, err = self.sweep("--dry-run")
+        self.assertEqual(code, 0, err[-3000:])
+        self.assertRegex(err, rf"{old} is 720[0-9] s old, over 3600 s: would delete")
+        self.assertIn(f"{forgotten}: the gateway does not list it", err)
+        self.assertIn("would remove it through the API", err)
+        self.assertEqual(len(self.api.names()), 2)
+        self.assertEqual(self.api.deletes(), [])
+
+    def test_the_sweep_starts_no_removal_it_has_no_time_to_end(self):
+        forgotten = job.sandbox_name("forgotten-run", time.time() - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, time.time() - 7200))
+        code, err = self.sweep(SWEEP_DEADLINE_SECONDS="1")  # less than the worst case of one sandbox
+        self.assertEqual(code, 1)
+        self.assertIn("the deadline of the sweep: 1 Sandbox records are left for the next sweep", err)
+        self.assertEqual(self.api.deletes(), [])
+
+    def test_the_sweep_with_no_right_to_the_records_fails(self):
+        old = job.sandbox_name("old-run", time.time() - 7200)
+        self.gateway_sandbox(old, time.time() - 7200)
+        self.api.fail_with = 403
+        code, err = self.sweep()
+        self.assertEqual(code, 1)
+        self.assertIn("the list of the Sandbox records: list sandboxes: HTTP 403", err)
+
+    def test_the_sweep_reports_a_record_stuck_in_deletion(self):
+        # In process, with a clock that a sleep moves on, so that the waits take no time.
+        clock = Clock()
+        forgotten = job.sandbox_name("forgotten-run", time.time() - 7200)
+        self.api.add(fake_sandboxes.record(forgotten, time.time() - 7200))
+        self.api.stuck = True
+        api = records.Records(
+            base_url=self.api.url,
+            namespace=fake_sandboxes.NAMESPACE,
+            token_file=str(self.token_file),
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+        cli = OpenShell(self.cli_path, "workflows")
+        os.environ["FAKE_OPENSHELL_STATE"] = str(self.state)
+        self.addCleanup(os.environ.pop, "FAKE_OPENSHELL_STATE", None)
+        with self.assertLogs("sweep", level="ERROR") as logs:
+            code = sweep.Sweep(cli, api, 3600, 420, dry_run=False).run()
+        self.assertEqual(code, 1)
+        self.assertIn(f"still there {sweep.API_WAIT} s after its delete through the API", "\n".join(logs.output))
+        self.assertGreaterEqual(clock.now, sweep.API_WAIT)
+        self.assertEqual(len(self.api.deletes()), 1)  # one delete, then the wait
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class RunRecords(unittest.TestCase):
+    def test_only_a_record_that_openshell_made_for_a_run_name_is_a_run_record(self):
+        name = job.sandbox_name("k", time.time())
+        self.assertTrue(records.is_run_record(fake_sandboxes.record(name)))
+        self.assertFalse(records.is_run_record(fake_sandboxes.record("platform-probe")))
+        self.assertFalse(records.is_run_record(fake_sandboxes.record("run-zzzzzzz-1")))
+        theirs = {"openshell.ai/managed-by": "other", "openshell.ai/sandbox-name": name}
+        self.assertFalse(records.is_run_record(fake_sandboxes.record(name, labels=theirs)))
+        self.assertFalse(records.is_run_record({"metadata": {"name": f"default--{name}"}}))
+
+    def test_the_age_of_a_record_is_that_of_its_younger_clock(self):
+        now = time.time()
+        rec = fake_sandboxes.record(job.sandbox_name("k", now - 7200), now - 100)
+        self.assertLess(records.age_seconds(rec, now), 200)
+        rec = fake_sandboxes.record(job.sandbox_name("k", now - 100), now - 7200)
+        self.assertLess(records.age_seconds(rec, now), 200)
+        rec["metadata"]["creationTimestamp"] = "not a time"
+        self.assertIsNone(records.age_seconds(rec, now))
+
+    def test_a_delete_refuses_a_record_that_is_not_a_run_record(self):
+        api = records.Records(base_url="http://127.0.0.1:9", namespace="ns", token_file="/nonexistent")
+        with self.assertRaises(records.RecordError):
+            api.delete(fake_sandboxes.record("platform-probe"))
 
 
 if __name__ == "__main__":

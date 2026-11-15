@@ -12,7 +12,8 @@ Usage:
   as they are: litellm-app in `ai`, alloy in `monitoring`.
 - setup: the Job that imports the provider profiles and makes the providers.
 - receiver: the run receiver as tnwks-ops runs it, with its Role, the service
-  account of the run jobs, the token, the list of agents and the sandbox policy.
+  accounts of the run jobs and of the sweep with their Roles (the Sandbox
+  records), the token, the list of agents and the sandbox policy.
 
 The test values come from tests/support. It uses the standard library only.
 """
@@ -204,8 +205,27 @@ def receiver(image: str, agents_file: str, token: str) -> list:
             "metadata": {"name": name, "namespace": ns},
             "automountServiceAccountToken": False,
         }
-        for name in ("run-receiver", "workflow-run")
+        for name in ("run-receiver", "workflow-run", "workflow-sweep")
     ]
+    # The run job reads the Sandbox record of its sandbox after the delete; the
+    # sweep also removes a run record that the gateway left or forgot.
+    record_roles = []
+    for name, verbs in (("workflow-run", ["list"]), ("workflow-sweep", ["list", "delete"])):
+        record_roles += [
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": name, "namespace": ns},
+                "rules": [{"apiGroups": ["agents.x-k8s.io"], "resources": ["sandboxes"], "verbs": verbs}],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": name, "namespace": ns},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+                "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": ns}],
+            },
+        ]
     secret = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -231,6 +251,7 @@ def receiver(image: str, agents_file: str, token: str) -> list:
         *accounts,
         role,
         binding,
+        *record_roles,
         secret,
         config_map("run-receiver-agents", ns, {"agents.yaml": Path(agents_file).read_text()}),
         config_map(
@@ -260,8 +281,8 @@ def sweep(image: str, name: str, max_age: int, dry_run: bool) -> dict:
             "template": {
                 "spec": {
                     "restartPolicy": "Never",
-                    "serviceAccountName": "workflow-run",
-                    "automountServiceAccountToken": False,
+                    "serviceAccountName": "workflow-sweep",
+                    "automountServiceAccountToken": True,
                     "securityContext": POD_SECURITY,
                     "containers": [c],
                     "volumes": [MTLS, TMP],

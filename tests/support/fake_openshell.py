@@ -9,8 +9,17 @@ of the CLI, as the ssh child of the real CLI does (seen on the kind cluster).
 `forward stop` stops that child. `sandbox delete` stops the process. Each call
 is a JSON line in $FAKE_OPENSHELL_STATE/calls.jsonl.
 
+`sandbox create` also writes the Sandbox record of the sandbox to
+$FAKE_OPENSHELL_STATE/records/, as the gateway does in Kubernetes, and a fake
+API (fake_sandboxes.py) serves those files; `sandbox delete` removes it.
+
 FAKE_OPENSHELL_MODE holds words that change one step: create-fails,
-delete-fails, no-serve (the sandbox never answers /ping).
+delete-fails, no-serve (the sandbox never answers /ping), and three ways of
+the record: delete-keeps-record (the delete answers success, and the gateway
+forgets the sandbox and leaves its record, as OpenShell 0.1.8 did),
+forgot-before-delete (the gateway forgot the sandbox before the delete: the
+delete answers "not found", and the record stays), and record-goes-slowly
+(the record goes after three more reads, as a record in deletion does).
 """
 
 import json
@@ -19,6 +28,9 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from support.fake_sandboxes import READS_LEFT, record
 
 PROVIDER_ENV = {"model-gateway": "MODEL_GATEWAY_KEY", "github-reviewer": "GITHUB_TOKEN"}
 
@@ -63,6 +75,10 @@ def main(argv: list[str]) -> int:
         log = open(state / f"{name}.log", "w")
         proc = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
         (state / f"{name}.pid").write_text(str(proc.pid))
+        records = state / "records"
+        records.mkdir(exist_ok=True)
+        rec = record(name)
+        (records / f"{rec['metadata']['name']}.json").write_text(json.dumps(rec))
         return 0
     if args[:2] == ["forward", "start"]:
         child = subprocess.Popen(["sleep", "600"], start_new_session=True)  # inherits stdout and stderr
@@ -83,6 +99,10 @@ def main(argv: list[str]) -> int:
         if "delete-fails" in mode:
             print("error: the gateway is not available", file=sys.stderr)
             return 1
+        rec_file = state / "records" / f"default--{name}.json"
+        if pid_file.exists() and "forgot-before-delete" in mode:
+            os.killpg(int(pid_file.read_text()), signal.SIGTERM)
+            pid_file.unlink()  # the gateway forgot it; its record stays
         if not pid_file.exists():
             print(f"error: sandbox {name} not found", file=sys.stderr)
             return 1
@@ -91,6 +111,13 @@ def main(argv: list[str]) -> int:
         except ProcessLookupError:
             pass
         pid_file.unlink()
+        if rec_file.exists() and "record-goes-slowly" in mode:
+            rec = json.loads(rec_file.read_text())
+            rec["metadata"]["deletionTimestamp"] = "2026-11-15T00:00:00Z"
+            rec["metadata"]["annotations"] = {READS_LEFT: "3"}
+            rec_file.write_text(json.dumps(rec))
+        elif rec_file.exists() and "delete-keeps-record" not in mode:
+            rec_file.unlink()
         return 0
     if args[:2] == ["sandbox", "list"]:
         names = [p.stem for p in state.glob("*.pid")]
