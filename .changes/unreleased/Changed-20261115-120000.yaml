@@ -1,3 +1,0 @@
-kind: Changed
-body: 'The run receiver checks the Sandbox record of each run after its end, writes `gone` or `left` in the Job annotation `workflow-agents/sandbox-record` (shown as `sandbox_record`), and logs an ERROR line for a record that stays. The sweep also lists the run records through the Kubernetes API, and removes each old one that the gateway left or does not list. The run job keeps no token. The receiver now needs `list` on `sandboxes` (`agents.x-k8s.io`), and the sweep its own service account with `list` and `delete`: grant them before this release runs.'
-time: 2026-11-15T12:00:00.000000+00:00

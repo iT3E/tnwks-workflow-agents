@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.0 - 2026-11-15
+
+### Changed
+
+* The run receiver checks the Sandbox record of each run after its end, writes `gone` or `left` in the Job annotation `workflow-agents/sandbox-record` (shown as `sandbox_record`), and logs an ERROR line for a record that stays. The sweep also lists the run records through the Kubernetes API, and removes each old one that the gateway left or does not list. The run job keeps no token. The receiver now needs `list` on `sandboxes` (`agents.x-k8s.io`), and the sweep its own service account with `list` and `delete`: grant them before this release runs.
+
 ## v0.1.5 - 2026-11-14
 
 ### Security
