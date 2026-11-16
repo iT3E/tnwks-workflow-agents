@@ -5,6 +5,7 @@ run. The gates (allowed repository, open, same head, no review yet) are code.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -12,14 +13,14 @@ import unittest
 from unittest import mock
 
 import support  # noqa: F401  (sets the import path)
-from support import fake_github, mock_model
-from support.cases import REVIEW_TEXT, RenovateReviewerCase
-
 from agents import renovate_reviewer
 from agents.renovate_reviewer import agent as reviewer
+from agents.renovate_reviewer import prompt
 from agents.renovate_reviewer.github import PullRequest
 from agents.renovate_reviewer.tools import READ_ONLY_TOOLS
 from contract import ConfigError, InputError
+from support import fake_github, mock_model
+from support.cases import REVIEW_TEXT, RenovateReviewerCase
 
 ALLOWED_PATHS = [
     ("GET", rf"^/repos/{fake_github.REPO}/pulls/{fake_github.NUMBER}(\?.*)?$"),
@@ -29,6 +30,28 @@ ALLOWED_PATHS = [
     ("GET", rf"^/repos/{fake_github.REPO}/commits/{fake_github.HEAD}/check-runs(\?.*)?$"),
     ("POST", rf"^/repos/{fake_github.REPO}/issues/{fake_github.NUMBER}/comments$"),
 ]
+
+
+BLOCKED_TEXT = (
+    "Verdict: blocked\n\n**What changes.** The image of the bridge goes from 0.2.3 to 0.2.4.\n\n"
+    "**Breaking changes.** None found in the release notes.\n\n"
+    "**Changes this pull request needs.** None.\n\n**Steps with no revert.** None.\n\n"
+    "**Checks.** Build Success passed. No CI builds the changed image: a build of "
+    "`ghcr.io/example/bridge:0.2.4` must run before the merge."
+)
+
+
+class BlockedCase(RenovateReviewerCase):
+    """The same case, with a model that asks for a check that no CI ran."""
+
+    @contextlib.contextmanager
+    def running(self):
+        with (
+            fake_github.FakeGitHub() as gh,
+            mock_model.server(mock_model.reviewer_script(BLOCKED_TEXT, fake_github.DIFF_PATH)) as model,
+        ):
+            self.github, self.model = gh, model
+            yield self
 
 
 def run(case, payload):
@@ -60,6 +83,18 @@ class Review(unittest.TestCase):
         self.assertIn("Verdict: `needs-changes`", body)
         self.assertIn("The owner decides.", body)
         self.assertIn("`server.port` moved to `service.port`", body)
+
+    def test_the_model_gets_the_meaning_of_each_verdict(self):
+        # ready needs each check to have run in CI; a check that no CI ran
+        # makes the verdict blocked, and the review names it.
+        run(self.case, self.case.good_input())
+        system = json.dumps(self.model_requests()[0]["system"])
+        self.assertIn("each check that the update needs ran in CI and passed", system)
+        self.assertIn("A check that no CI ran is not a pass.", system)
+        self.assertIn(
+            "A check that the update needs and that no CI ran comes first too, and the Checks section names it.",
+            system,
+        )
 
     def test_the_model_gets_read_tools_only_and_the_key_of_the_gateway(self):
         run(self.case, self.case.good_input())
@@ -152,7 +187,27 @@ class Review(unittest.TestCase):
                 run(self.case, bad)
 
 
+class BlockedByACheck(unittest.TestCase):
+    def test_a_review_that_asks_for_a_check_no_ci_ran_is_blocked_and_names_it(self):
+        case = BlockedCase()
+        with case.running():
+            out = run(case, case.good_input())
+            writes = case.github.writes()
+        self.assertEqual((out["status"], out["verdict"]), ("reviewed", "blocked"))
+        self.assertEqual(len(writes), 1)
+        body = json.loads(writes[0]["body"])["body"]
+        self.assertIn("Verdict: `blocked`", body)
+        self.assertIn("a build of `ghcr.io/example/bridge:0.2.4` must run before the merge", body)
+
+
 class Parts(unittest.TestCase):
+    def test_the_meaning_of_each_verdict_is_in_the_prompt(self):
+        lines = prompt.SYSTEM_PROMPT.split("\n")
+        meanings = {v: [line for line in lines if line.startswith(f"- {v}: ")] for v in prompt.VERDICTS}
+        self.assertEqual({v: len(m) for v, m in meanings.items()}, dict.fromkeys(prompt.VERDICTS, 1))
+        self.assertIn("ran in CI and passed", meanings["ready"][0])
+        self.assertIn("no CI ran", meanings["blocked"][0])
+
     def test_verdicts(self):
         self.assertEqual(reviewer.verdict_of(REVIEW_TEXT), "needs-changes")
         self.assertEqual(reviewer.verdict_of("**Verdict:** `one-way`\nx"), "one-way")

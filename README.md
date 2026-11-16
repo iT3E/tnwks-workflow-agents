@@ -313,9 +313,17 @@ is in `REVIEWER_REPOSITORIES`, the pull request is open, its head is still
 reads the pull request with six read tools (the overview with the release
 notes, the changed files, a diff, a file at the head, the comments of trusted
 authors, the checks) and writes a review. The code posts it as one comment,
-with a verdict: `ready`, `needs-changes`, `one-way` or `blocked`. The answer
-is `{"status": "reviewed" | "skipped", "repo", "pr", "head_sha", "verdict",
-"comment_url", "reason"}`. The review is advice; the owner decides.
+with a verdict. The answer is `{"status": "reviewed" | "skipped", "repo",
+"pr", "head_sha", "verdict", "comment_url", "reason"}`. The review is
+advice; the owner decides. The verdicts (`src/agents/renovate_reviewer/prompt.py`):
+
+| Verdict | Meaning |
+| --- | --- |
+| `ready` | The update needs no change in the repository, each step has a revert, and each check that it needs ran in CI and passed |
+| `needs-changes` | The update needs a change in the repository before it works |
+| `one-way` | A step has no revert; the owner must approve it |
+| `blocked` | Something outside the pull request must come first. A check that the update needs and that no CI ran (a build of a changed image, a test by hand) comes first too, and the Checks section of the review names it |
+| `unclear` | The review has no verdict line that the code can read |
 
 The model is the Strands Anthropic model, on the Anthropic Messages API of
 the model gateway. Each call sends the effort (`output_config.effort`), and

@@ -1,0 +1,3 @@
+kind: Fixed
+body: 'The Renovate reviewer gives `ready` only when each check that the update needs ran in CI and passed. When the update needs a check that no CI ran (a build of a changed image, a test by hand), the verdict is `blocked`, and the Checks section of the review names that check. Before, such a review could say `ready` and ask for the check in its text only. The README lists what each verdict means.'
+time: 2026-11-16T22:00:00.000000+00:00
