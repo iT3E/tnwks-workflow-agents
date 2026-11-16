@@ -36,8 +36,8 @@ BLOCKED_TEXT = (
     "Verdict: blocked\n\n**What changes.** The image of the bridge goes from 0.2.3 to 0.2.4.\n\n"
     "**Breaking changes.** None found in the release notes.\n\n"
     "**Changes this pull request needs.** None.\n\n**Steps with no revert.** None.\n\n"
-    "**Checks.** Build Success passed. No CI builds the changed image: a build of "
-    "`ghcr.io/example/bridge:0.2.4` must run before the merge."
+    "**Checks.** Build Success passed. `docs/upgrade.md` asks for a restore test of "
+    "the bridge state before the merge of a minor version, and no CI ran it."
 )
 
 
@@ -89,12 +89,13 @@ class Review(unittest.TestCase):
         # makes the verdict blocked, and the review names it.
         run(self.case, self.case.good_input())
         system = json.dumps(self.model_requests()[0]["system"])
-        self.assertIn("each check that the update needs ran in CI and passed", system)
-        self.assertIn("A check that no CI ran is not a pass.", system)
-        self.assertIn(
-            "A check that the update needs and that no CI ran comes first too, and the Checks section names it.",
-            system,
-        )
+        self.assertIn("this review asks a person to run no check before the merge", system)
+        self.assertIn("the verdict is blocked and the Checks section names the check", system)
+        self.assertIn("A check that the review does not ask for does not block.", system)
+        # What a needed check is, and what a skipped one is not.
+        self.assertIn("An image that its upstream project built and released needs no build", system)
+        self.assertIn("it is not a missing check and not a failed check", system)
+        self.assertIn("in this order: blocked, needs-changes, one-way, ready", system)
 
     def test_the_model_gets_read_tools_only_and_the_key_of_the_gateway(self):
         run(self.case, self.case.good_input())
@@ -197,7 +198,7 @@ class BlockedByACheck(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         body = json.loads(writes[0]["body"])["body"]
         self.assertIn("Verdict: `blocked`", body)
-        self.assertIn("a build of `ghcr.io/example/bridge:0.2.4` must run before the merge", body)
+        self.assertIn("asks for a restore test of the bridge state before the merge", body)
 
 
 class Parts(unittest.TestCase):
@@ -205,8 +206,10 @@ class Parts(unittest.TestCase):
         lines = prompt.SYSTEM_PROMPT.split("\n")
         meanings = {v: [line for line in lines if line.startswith(f"- {v}: ")] for v in prompt.VERDICTS}
         self.assertEqual({v: len(m) for v, m in meanings.items()}, dict.fromkeys(prompt.VERDICTS, 1))
-        self.assertIn("ran in CI and passed", meanings["ready"][0])
-        self.assertIn("no CI ran", meanings["blocked"][0])
+        self.assertIn("asks a person to run no check before the merge", meanings["ready"][0])
+        self.assertIn("no CI ran that check, the verdict is blocked", meanings["blocked"][0])
+        order = next(line for line in lines if line.startswith("When more than one verdict applies"))
+        self.assertIn("blocked, needs-changes, one-way, ready", order)
 
     def test_verdicts(self):
         self.assertEqual(reviewer.verdict_of(REVIEW_TEXT), "needs-changes")
