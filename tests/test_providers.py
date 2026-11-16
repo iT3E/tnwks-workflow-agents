@@ -275,6 +275,66 @@ class Providers(unittest.TestCase):
             err.splitlines()[-1], "workflow-providers result=failed step=gateway name=https://sandbox-gateway.test:8080"
         )
 
+    def assertFailedCleanly(self, code: int, out: str, err: str, step: str, name: str):
+        """Exit 1, the failed line last, no traceback, no secret."""
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(err.splitlines()[-1], f"workflow-providers result=failed step={step} name={name}")
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("result=ok", out)
+        self.assertNoSecret(out, err)
+
+    def test_an_answer_of_200_that_is_not_json_fails_github_token(self):
+        cases = [
+            ("/app", b"<html>a proxy page</html>", "GET /app: the answer is not JSON"),
+            ("/app", b"\xff\xfe", "GET /app: the answer is not JSON"),
+            (
+                f"/repos/{fake_github.REPO}/installation",
+                b"[]",
+                f"GET /repos/{fake_github.REPO}/installation: the answer is not a JSON object",
+            ),
+            (
+                f"/app/installations/{fake_github_app.INSTALLATION_ID}/access_tokens",
+                f"token={fake_github.TOKEN} and not JSON".encode(),
+                f"POST /app/installations/{fake_github_app.INSTALLATION_ID}/access_tokens: the answer is not JSON",
+            ),
+        ]
+        for path, raw, reason in cases:
+            with self.subTest(path=path, raw=raw[:8]):
+                self.github.raw = {path: raw}
+                code, out, err = self.run_providers()
+                self.assertFailedCleanly(code, out, err, "github-token", "github-reviewer")
+                self.assertIn(f"github app token: {reason}", err.splitlines())
+
+    def test_a_profile_that_is_not_utf8_fails_profile_import(self):
+        (self.profiles / "workflow-model-gateway.yaml").write_bytes(b"id: workflow-model-gateway\n\xff\xfe\n")
+        code, out, err = self.run_providers()
+        self.assertFailedCleanly(code, out, err, "profile-import", "workflow-model-gateway")
+        self.assertIn(
+            "profile workflow-model-gateway.yaml: the file can not be read as UTF-8 text (UnicodeDecodeError)",
+            err.splitlines(),
+        )
+        self.assertEqual(self.github.minted, [])
+
+    def test_an_unexpected_error_fails_the_step_that_runs_and_logs_only_its_type(self):
+        cases = [
+            ("profile-list-not-utf8", "gateway", "https://sandbox-gateway.test:8080", False),
+            ("profile-export-not-utf8", "profile-export", "workflow-github-reviewer", True),
+            ("provider-get-not-utf8", "provider-create", "model-gateway", False),
+        ]
+        for mode, step, name, first in cases:
+            with self.subTest(mode):
+                shutil.rmtree(self.state, ignore_errors=True)
+                if first:
+                    self.assertEqual(self.run_providers()[0], 0)
+                minted = len(self.github.minted)
+                code, out, err = self.run_providers(FAKE_OPENSHELL_MODE=mode)
+                self.assertFailedCleanly(code, out, err, step, name)
+                self.assertEqual(
+                    err.splitlines()[-2], f"workflow-providers: an unexpected UnicodeDecodeError in step {step}"
+                )
+                self.assertNotIn("0xff", err)
+                self.assertEqual(len(self.github.minted), minted)
+
     def test_each_result_line_starts_the_line(self):
         _, out, err = self.run_providers(FAKE_OPENSHELL_MODE="gateway-down")
         for line in (out + err).splitlines():

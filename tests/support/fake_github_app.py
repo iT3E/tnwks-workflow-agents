@@ -40,6 +40,8 @@ class FakeGitHubApp:
         self.token_permissions: dict | None = None  # None: what the call asks, and metadata
         self.public_key = public_key
         self.minted: list[dict] = []
+        # path: bytes that the fake answers with 200 in place of its JSON
+        self.raw: dict[str, bytes] = {}
 
     def jwt_ok(self, header: str) -> bool:
         if not header.startswith("Bearer "):
@@ -71,6 +73,8 @@ class FakeGitHubApp:
         if not self.jwt_ok(handler.headers.get("authorization") or ""):
             return 401, {"message": "A JSON web token could not be decoded"}, None
         p = path.split("?", 1)[0]
+        if p in self.raw:
+            return 200, self.raw[p], {"content-type": "text/html"}
         if method == "GET" and p == "/app":
             return 200, {"id": int(APP_ID), "permissions": self.app_permissions}, None
         if method == "GET" and p == PREFIXES[1]:

@@ -22,8 +22,9 @@ For the providers command, the store of the gateway is in
 $FAKE_OPENSHELL_STATE/profiles/<id>.json and providers/<name>.json. A
 provider keeps the sha256 of its credential value (read from the env var
 that --credential names, as the real CLI does), never the value. More modes:
-gateway-down (`profile list` fails), and <call>-fails for profile-export,
-profile-import, profile-update, provider-create and provider-update.
+gateway-down (`profile list` fails), <call>-fails for profile-export,
+profile-import, profile-update, provider-create and provider-update, and
+<call>-not-utf8 (the call prints bytes that are not UTF-8 and exits 0).
 """
 
 import hashlib
@@ -138,6 +139,9 @@ def store(state: Path, mode: list[str], args: list[str]) -> int:
     profiles.mkdir(exist_ok=True)
     providers.mkdir(exist_ok=True)
     call = "-".join(args[:2])
+    if f"{call}-not-utf8" in mode:
+        sys.stdout.buffer.write(b"\xff\xfe not text\n")
+        return 0
     if f"{call}-fails" in mode:
         print(f"error: {call} refused by the fake gateway", file=sys.stderr)
         return 1

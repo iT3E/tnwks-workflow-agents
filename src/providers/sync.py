@@ -24,6 +24,11 @@ ends well logs "workflow-providers result=ok" and exits 0. A missing
 variable logs step=config and exits 2. Each line starts at the first column,
 because the log pipeline of tnwks-ops reads "<check> result=<result>" there.
 
+An error that no step expects (a bug, or an answer in a form that the code
+does not handle) also logs the failed line, with the step that was running,
+and exits 1. Its log line names only the type of the error: its text can
+hold a value of the run, so it does not go to the log, and no traceback does.
+
 No `profile lint`: import and update check the profile themselves, and lint
 fails on a profile that is already in the store (in OpenShell 0.1.7 and
 0.1.8, lint runs the conflict check of import). An update needs the
@@ -88,9 +93,12 @@ class Sync:
         self.profiles = profiles
         self.environ = environ
         self.mint = mint
+        # The step that runs now, for the failed line of an unexpected error.
+        self.at = ("gateway", environ.get("OPENSHELL_GATEWAY_URL", ""))
 
     def osh(self, step: str, name: str, args: list[str], env: dict[str, str] | None = None) -> str:
         """One CLI call that must work; its error goes to the log, then the failed line."""
+        self.at = (step, name)
         try:
             return self.cli.call(args, env=env).stdout
         except OpenShellError as e:
@@ -113,10 +121,18 @@ class Sync:
         out.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
     def profile(self, src: Path, work: Path) -> None:
-        text = src.read_text(encoding="utf-8")
+        # A profile that is not in the store is imported, so its first step is import.
+        self.at = ("profile-import", src.stem)
+        try:
+            data = src.read_bytes()
+            text = data.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            tell(f"profile {src.name}: the file can not be read as UTF-8 text ({type(e).__name__})")
+            raise Failed("profile-import", src.stem) from e
         found = ID_LINE.search(text)
         pid = found.group(1) if found else ""
-        digest = hashlib.sha256(src.read_bytes()).hexdigest()
+        self.at = ("profile-import", pid)
+        digest = hashlib.sha256(data).hexdigest()
         out = work / f"profile-{pid}.yaml"
         if not self.exists(["profile", "describe", pid]):
             try:
@@ -147,6 +163,8 @@ class Sync:
         say(f"profile {pid}: updated")
 
     def provider(self, name: str, profile: str, var: str, env: dict[str, str] | None = None) -> None:
+        # A provider that is not in the store is created, so its first step is create.
+        self.at = ("provider-create", name)
         if self.exists(["provider", "get", name]):
             self.osh("provider-update", name, ["provider", "update", name, "--credential", var], env)
             say(f"provider {name}: updated")
@@ -167,6 +185,7 @@ class Sync:
                 self.profile(src, Path(tmp))
         self.provider(*MODEL_PROVIDER)
         # The token goes into the env of the CLI call, and nowhere else.
+        self.at = ("github-token", GITHUB_PROVIDER[0])
         try:
             token = self.mint(self.environ)
         except github_app.TokenError as e:
@@ -179,10 +198,13 @@ class Sync:
 
 def main(environ: dict[str, str] | None = None) -> int:
     environ = dict(os.environ if environ is None else environ)
+    at = ("config", "-")
+    sync: Sync | None = None
     try:
         url = environ.get("OPENSHELL_GATEWAY_URL", "")
         if not url:
             raise Failed("config", "OPENSHELL_GATEWAY_URL", code=2)
+        at = ("gateway", url)
         cli = OpenShell(environ.get("OPENSHELL_BIN", "openshell"), environ.get("OPENSHELL_GATEWAY_NAME", "workflows"))
         try:
             cli.register(url, environ.get("OPENSHELL_MTLS_DIR", "/etc/openshell/mtls"))
@@ -190,8 +212,14 @@ def main(environ: dict[str, str] | None = None) -> int:
             tell(str(e))
             raise Failed("gateway", url) from e
         profiles = Path(environ.get("PROVIDER_PROFILES_DIR", "/etc/workflow-providers/profiles"))
-        Sync(cli, profiles, environ).run()
+        sync = Sync(cli, profiles, environ)
+        sync.run()
     except Failed as f:
         tell(f"workflow-providers result=failed step={f.step} name={f.name}")
         return f.code
+    except Exception as e:  # noqa: BLE001  (each error ends with the failed line)
+        step, name = sync.at if sync else at
+        tell(f"workflow-providers: an unexpected {type(e).__name__} in step {step}")
+        tell(f"workflow-providers result=failed step={step} name={name}")
+        return 1
     return 0
