@@ -27,11 +27,15 @@ class OpenShell:
         self.binary = binary
         self.gateway = gateway
 
-    def _run(self, args: list[str], timeout: float, check: bool = True) -> subprocess.CompletedProcess:
+    def _run(
+        self, args: list[str], timeout: float, check: bool = True, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess:
         cmd = [self.binary, "--color", "never", "-g", self.gateway, *args]
         log.info("openshell %s", " ".join(args[:2]))
         try:
-            done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            done = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env
+            )
         except subprocess.TimeoutExpired as e:
             raise OpenShellError(f"openshell {' '.join(args[:2])} took more than {timeout:.0f} s") from e
         if check and done.returncode != 0:
@@ -112,6 +116,12 @@ class OpenShell:
 
     def delete(self, name: str, timeout: float = 120) -> None:
         self._run(["sandbox", "delete", name], timeout)
+
+    def call(
+        self, args: list[str], timeout: float = 60, check: bool = True, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess:
+        """Any other call (the providers command): the profile and provider calls."""
+        return self._run(args, timeout, check=check, env=env)
 
     def names(self, selector: str) -> list[str]:
         done = self._run(["sandbox", "list", "--names", "--selector", selector], timeout=60)

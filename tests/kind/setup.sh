@@ -1,27 +1,31 @@
 #!/bin/sh
-# The providers of the test cluster, as the ops repository makes them for the
-# workflow trust domain. It runs in the setup Job (tests/kind/manifests.py), in
-# the image under test, with the client certificate of the sandbox gateway.
-# The credentials are the test values of tests/support, not secrets.
+# The providers of the test cluster, made by the providers command of the
+# image under test, as the CronJob workflow-providers of the ops repository
+# makes them for the workflow trust domain. It runs in the setup Job
+# (tests/kind/manifests.py), with the client certificate of the sandbox
+# gateway, against the real OpenShell CLI and gateway. The GitHub App is the
+# fake of tests/support (in the fake GitHub), and its key is made here. The
+# credentials are the test values of tests/support, not secrets.
+#
+# It runs the command twice: the first run imports the profiles and creates
+# the providers, the second finds the profiles unchanged and updates the
+# providers. Each run must end with "workflow-providers result=ok".
 set -eu
-dir="$HOME/.config/openshell/gateways/kind/mtls"
-mkdir -p "$dir"
-cp /mtls/ca.crt /mtls/tls.crt /mtls/tls.key "$dir/"
-chmod 0600 "$dir"/*
-osh() { openshell --color never -g kind "$@"; }
 
-echo "== gateway add $GATEWAY_URL"
-openshell --color never gateway add "$GATEWAY_URL" --local --name kind
+python3 /setup/profiles.py /setup "$PROVIDER_PROFILES_DIR" "$FAKE_GITHUB_HOST" "$FAKE_GITHUB_PORT"
+openssl genrsa -out "$GITHUB_APP_KEY_FILE" 2048 2>/dev/null
 
-python3 /setup/profiles.py /setup /tmp/profiles "$FAKE_GITHUB_HOST" "$FAKE_GITHUB_PORT"
-for f in /tmp/profiles/*.yaml; do
-  echo "== profile lint and import: $f"
-  osh profile lint -f "$f"
-  osh profile import -f "$f"
+# Each run in a HOME of its own, as each run of the CronJob is a new pod: the
+# CLI refuses to add a gateway name that its config already has.
+for round in first second; do
+  echo "== providers, $round run"
+  mkdir -p "/tmp/home-$round"
+  HOME="/tmp/home-$round" python3 /app/src/entrypoint.py providers 2>&1 | tee "/tmp/providers-$round.log"
+  tail -n 1 "/tmp/providers-$round.log" | grep -qx 'workflow-providers result=ok'
 done
-osh profile list
-
-echo "== providers"
-osh provider create --name model-gateway --type workflow-model-gateway --credential "MODEL_GATEWAY_KEY=$MODEL_KEY"
-osh provider create --name github-reviewer --type workflow-github-reviewer --credential "GITHUB_TOKEN=$GITHUB_KEY"
-osh provider list
+grep -q '^profile workflow-model-gateway: imported$' /tmp/providers-first.log
+grep -q '^provider github-reviewer: created$' /tmp/providers-first.log
+grep -q '^profile workflow-model-gateway: unchanged$' /tmp/providers-second.log
+grep -q '^provider github-reviewer: updated$' /tmp/providers-second.log
+grep -q '^app-drift result=ok detail=none$' /tmp/providers-second.log
+echo "== providers: both runs ok"
