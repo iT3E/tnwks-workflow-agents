@@ -15,9 +15,12 @@ set -eu
 python3 /setup/profiles.py /setup "$PROVIDER_PROFILES_DIR" "$FAKE_GITHUB_HOST" "$FAKE_GITHUB_PORT"
 openssl genrsa -out "$GITHUB_APP_KEY_FILE" 2048 2>/dev/null
 
+# Each run in a HOME of its own, as each run of the CronJob is a new pod: the
+# CLI refuses to add a gateway name that its config already has.
 for round in first second; do
   echo "== providers, $round run"
-  python3 /app/src/entrypoint.py providers 2>&1 | tee "/tmp/providers-$round.log"
+  mkdir -p "/tmp/home-$round"
+  HOME="/tmp/home-$round" python3 /app/src/entrypoint.py providers 2>&1 | tee "/tmp/providers-$round.log"
   tail -n 1 "/tmp/providers-$round.log" | grep -qx 'workflow-providers result=ok'
 done
 grep -q '^profile workflow-model-gateway: imported$' /tmp/providers-first.log
