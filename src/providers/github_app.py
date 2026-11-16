@@ -31,8 +31,9 @@ Environment:
     GITHUB_APP_PERMISSIONS  name:level, comma separated (level read or write)
     GITHUB_API_URL          default https://api.github.com
 
-A config error or a failed step raises TokenError; the caller logs
-"github app token: <reason>" and fails the step github-token.
+A config error, a failed step or an answer that is not a JSON object raises
+TokenError; the caller logs "github app token: <reason>" and fails the step
+github-token. No reason holds the text of an answer of 200.
 """
 
 import base64
@@ -105,13 +106,21 @@ def call(api: str, method: str, path: str, jwt: str, body: dict | None = None) -
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read() or b"{}")
+            raw = r.read() or b"{}"
     except urllib.error.HTTPError as e:
         try:
             message = str(json.loads(e.read() or b"{}").get("message", ""))[:200]
         except ValueError:
             message = ""
         raise TokenError(f"{method} {path}: {e.code} {message}".rstrip()) from None
+    # The text of the answer stays out of the log: it can hold a token.
+    try:
+        answer = json.loads(raw)
+    except ValueError:
+        raise TokenError(f"{method} {path}: the answer is not JSON") from None
+    if not isinstance(answer, dict):
+        raise TokenError(f"{method} {path}: the answer is not a JSON object")
+    return answer
 
 
 def compare(where: str, granted: dict, wanted: dict[str, str]) -> tuple[list[str], list[str]]:
