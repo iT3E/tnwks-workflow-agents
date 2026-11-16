@@ -1,0 +1,3 @@
+kind: Fixed
+body: 'The Renovate reviewer does not say `ready` when its own text asks a person to run a check before the merge that no CI ran: the verdict is then `blocked`, and the Checks section names the check with the file of the repository or the release note that asks for it. A check is needed only when the docs of the repository or the release notes ask for it; an image built by its upstream release needs no build, and a check skipped by its paths filter is not missing. When two verdicts apply, the order is `blocked`, `needs-changes`, `one-way`, `ready`. The README lists what each verdict means.'
+time: 2026-11-16T22:00:00.000000+00:00

@@ -5,6 +5,7 @@ run. The gates (allowed repository, open, same head, no review yet) are code.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -12,14 +13,14 @@ import unittest
 from unittest import mock
 
 import support  # noqa: F401  (sets the import path)
-from support import fake_github, mock_model
-from support.cases import REVIEW_TEXT, RenovateReviewerCase
-
 from agents import renovate_reviewer
 from agents.renovate_reviewer import agent as reviewer
+from agents.renovate_reviewer import prompt
 from agents.renovate_reviewer.github import PullRequest
 from agents.renovate_reviewer.tools import READ_ONLY_TOOLS
 from contract import ConfigError, InputError
+from support import fake_github, mock_model
+from support.cases import REVIEW_TEXT, RenovateReviewerCase
 
 ALLOWED_PATHS = [
     ("GET", rf"^/repos/{fake_github.REPO}/pulls/{fake_github.NUMBER}(\?.*)?$"),
@@ -29,6 +30,28 @@ ALLOWED_PATHS = [
     ("GET", rf"^/repos/{fake_github.REPO}/commits/{fake_github.HEAD}/check-runs(\?.*)?$"),
     ("POST", rf"^/repos/{fake_github.REPO}/issues/{fake_github.NUMBER}/comments$"),
 ]
+
+
+BLOCKED_TEXT = (
+    "Verdict: blocked\n\n**What changes.** The image of the bridge goes from 0.2.3 to 0.2.4.\n\n"
+    "**Breaking changes.** None found in the release notes.\n\n"
+    "**Changes this pull request needs.** None.\n\n**Steps with no revert.** None.\n\n"
+    "**Checks.** Build Success passed. `docs/upgrade.md` asks for a restore test of "
+    "the bridge state before the merge of a minor version, and no CI ran it."
+)
+
+
+class BlockedCase(RenovateReviewerCase):
+    """The same case, with a model that asks for a check that no CI ran."""
+
+    @contextlib.contextmanager
+    def running(self):
+        with (
+            fake_github.FakeGitHub() as gh,
+            mock_model.server(mock_model.reviewer_script(BLOCKED_TEXT, fake_github.DIFF_PATH)) as model,
+        ):
+            self.github, self.model = gh, model
+            yield self
 
 
 def run(case, payload):
@@ -60,6 +83,19 @@ class Review(unittest.TestCase):
         self.assertIn("Verdict: `needs-changes`", body)
         self.assertIn("The owner decides.", body)
         self.assertIn("`server.port` moved to `service.port`", body)
+
+    def test_the_model_gets_the_meaning_of_each_verdict(self):
+        # ready needs each check to have run in CI; a check that no CI ran
+        # makes the verdict blocked, and the review names it.
+        run(self.case, self.case.good_input())
+        system = json.dumps(self.model_requests()[0]["system"])
+        self.assertIn("this review asks a person to run no check before the merge", system)
+        self.assertIn("the verdict is blocked and the Checks section names the check", system)
+        self.assertIn("A check that the review does not ask for does not block.", system)
+        # What a needed check is, and what a skipped one is not.
+        self.assertIn("An image that its upstream project built and released needs no build", system)
+        self.assertIn("it is not a missing check and not a failed check", system)
+        self.assertIn("in this order: blocked, needs-changes, one-way, ready", system)
 
     def test_the_model_gets_read_tools_only_and_the_key_of_the_gateway(self):
         run(self.case, self.case.good_input())
@@ -152,7 +188,29 @@ class Review(unittest.TestCase):
                 run(self.case, bad)
 
 
+class BlockedByACheck(unittest.TestCase):
+    def test_a_review_that_asks_for_a_check_no_ci_ran_is_blocked_and_names_it(self):
+        case = BlockedCase()
+        with case.running():
+            out = run(case, case.good_input())
+            writes = case.github.writes()
+        self.assertEqual((out["status"], out["verdict"]), ("reviewed", "blocked"))
+        self.assertEqual(len(writes), 1)
+        body = json.loads(writes[0]["body"])["body"]
+        self.assertIn("Verdict: `blocked`", body)
+        self.assertIn("asks for a restore test of the bridge state before the merge", body)
+
+
 class Parts(unittest.TestCase):
+    def test_the_meaning_of_each_verdict_is_in_the_prompt(self):
+        lines = prompt.SYSTEM_PROMPT.split("\n")
+        meanings = {v: [line for line in lines if line.startswith(f"- {v}: ")] for v in prompt.VERDICTS}
+        self.assertEqual({v: len(m) for v, m in meanings.items()}, dict.fromkeys(prompt.VERDICTS, 1))
+        self.assertIn("asks a person to run no check before the merge", meanings["ready"][0])
+        self.assertIn("no CI ran that check, the verdict is blocked", meanings["blocked"][0])
+        order = next(line for line in lines if line.startswith("When more than one verdict applies"))
+        self.assertIn("blocked, needs-changes, one-way, ready", order)
+
     def test_verdicts(self):
         self.assertEqual(reviewer.verdict_of(REVIEW_TEXT), "needs-changes")
         self.assertEqual(reviewer.verdict_of("**Verdict:** `one-way`\nx"), "one-way")
