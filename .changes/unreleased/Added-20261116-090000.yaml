@@ -1,0 +1,3 @@
+kind: Added
+body: 'The `providers` command: it imports the provider profiles into the sandbox gateway, updates the model gateway provider, gets an installation token of the GitHub App of the reviewer (with the drift check), and updates the GitHub provider. It does what the providers script of the CronJob workflow-providers did, with the same log lines and exit codes, so that the tests and the kind cluster of CI cover it.'
+time: 2026-11-16T09:00:00.000000+00:00

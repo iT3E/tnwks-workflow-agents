@@ -133,6 +133,7 @@ The state of the run of that key, with the same bodies and codes as `POST`
 | `run-receiver` | The run receiver, a Deployment and a Service | A Role in its own namespace: `jobs` (`batch`): `create`, `get`, `list`, `patch` (the annotations of the kept result and of the record check only); `pods`: `list`; `pods/log`: `get`; `sandboxes` (`agents.x-k8s.io`): `list`, to check the Sandbox record of each run after its end |
 | `run-job` | The run job, a Job from the template | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate only |
 | `sweep [--dry-run]` | The time limit of the sandboxes, a CronJob | Its own service account, with a Role in its own namespace: `sandboxes` (`agents.x-k8s.io`): `list`, `delete`. RBAC can't limit a `delete` to the run records; the code deletes only a run record that is older than the limit, and an admission policy can check the labels of the record on DELETE |
+| `providers` | The provider profiles and providers of the sandbox gateway, a CronJob | None (`automountServiceAccountToken: false`). It talks to the sandbox gateway with the client certificate, and to the GitHub API with a JWT of the App |
 
 ### Environment of `serve` (the agent, in the sandbox)
 
@@ -243,6 +244,36 @@ A skew between them makes a record look younger or older by the skew only.
 Keep the margin between the age limit and the time limit of a run (3600 s
 against 2400 s and 90 s of grace in the example) far above any skew.
 
+### Environment of `providers`
+
+`OPENSHELL_GATEWAY_URL`, `OPENSHELL_MTLS_DIR` and `OPENSHELL_GATEWAY_NAME` as
+for the run job; `PROVIDER_PROFILES_DIR`, the provider profiles (`*.yaml`,
+default `/etc/workflow-providers/profiles`); `MODEL_GATEWAY_KEY`, the key of
+the trust domain at the model gateway; and for the GitHub App of the
+reviewer, `GITHUB_APP_ID`, `GITHUB_APP_KEY_FILE` (the private key, default
+`/github-app/private-key.pem`, read by `openssl` only), `GITHUB_REPOSITORY`,
+`GITHUB_APP_PERMISSIONS` (`name:read|write`, comma separated) and
+`GITHUB_API_URL` (default `https://api.github.com`).
+
+Each run imports each profile that the gateway does not have and updates
+each one whose file changed (the sha256 of the file is the annotation
+`workflow-agents/source-sha256` of the profile), updates or creates
+`model-gateway`, then gets a new installation token of the App and updates
+or creates `github-reviewer` with it. Before the token, it compares the
+permissions of the App and of its installation with the list: more than the
+list logs `app-drift result=drift detail=<names>` and the token is still
+scoped to the list; less than the list fails the run. Each credential is an
+env var of the CLI (`--credential NAME`), never a command argument, and no
+key or token goes to the log.
+
+Log lines and exit codes, as the alerts of tnwks-ops read them: `workflow-providers
+result=ok` and exit 0; one `workflow-providers result=failed step=<step>
+name=<name>` line and exit 1, with step `gateway`, `profile-export`,
+`profile-import`, `profile-update`, `provider-create`, `provider-update` or
+`github-token`; `step=config` and exit 2 when `OPENSHELL_GATEWAY_URL` is
+not set. A failure before the token (the gateway, a profile, the model
+provider) gets no token. Each `result=` line starts its line.
+
 ### The list of agents and the Job template
 
 [`examples/agents.yaml`](examples/agents.yaml) is the form of the config file,
@@ -305,6 +336,7 @@ trace collector, the Kubernetes API and the OpenShell CLI are fakes in
 | `test_contract.py` | The two paths for each agent of the image. The image with no command serves `AGENT_NAME` on 8080. Each span of a run is at the collector before the answer, and no text of the run is in a span |
 | `test_renovate_reviewer.py` | Read tools only, one comment, the gates, the allowed GitHub paths, no untrusted comment in the model input |
 | `test_run_receiver.py` | The token, the list of agents, the Job from the template, one run for one key, the status codes, the kept result when the pod is gone, and the check of the Sandbox record after a run |
+| `test_providers.py` | The providers command with a fake CLI and a fake GitHub App: import, unchanged and updated profiles, created and updated providers, each failed step and its line, the drift line, a token with other permissions, and no credential in a log or a command line |
 | `test_run_job.py` | The whole run with a fake CLI and a fake API for the Sandbox records, the delete on each failure and on SIGTERM, and the sweep through the gateway and through the API, with a record that the gateway leaves or forgets |
 | `kind/test_on_kind.py` | CI only, on the host of the job: the whole run on a kind cluster (below) |
 
@@ -316,7 +348,9 @@ In CI, `bin/image-test` then makes a kind cluster with one node
 cluster has Agent Sandbox and the OpenShell chart of the release of the
 `openshell-release` stage of the Dockerfile, in the namespace
 `agents-workflows` (the sandbox gateway of the trust domain); the providers
-of `examples/providers/`; the run receiver with its Role and the list of
+of `examples/providers/`, made by the `providers` command of the image (run
+twice: import and create, then unchanged and update) with the real CLI and
+gateway and a fake GitHub App; the run receiver with its Role and the list of
 `examples/agents.yaml`; and fakes in the image under test: the model gateway
 at `litellm-app.ai`, the trace collector at `alloy.monitoring`, and GitHub in
 `test-support`. The tests:

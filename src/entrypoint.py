@@ -4,6 +4,7 @@
     entrypoint.py run-receiver the service that makes a run job for each run
     entrypoint.py run-job      one run: a sandbox, the input, the answer, the delete
     entrypoint.py sweep        delete each run sandbox that is older than its time limit
+    entrypoint.py providers    the provider profiles and providers of the sandbox gateway
 
 With no argument it serves the contract, so a runtime that starts the image
 with no command gets the agent that AGENT_NAME names. Python puts the
@@ -27,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("run-job", help="run one workflow agent in a sandbox")
     sweep = sub.add_parser("sweep", help="delete run sandboxes past their time limit")
     sweep.add_argument("--dry-run", action="store_true", help="list, delete nothing")
+    sub.add_parser("providers", help="import the provider profiles and update the providers")
     args = parser.parse_args(argv)
 
     command = args.command or "serve"
@@ -42,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
         from run_job import job
 
         return job.main()
+    if command == "providers":
+        from providers import sync
+
+        return sync.main()
     from run_job import sweep as sweeper
 
     return sweeper.main(dry_run=args.dry_run)

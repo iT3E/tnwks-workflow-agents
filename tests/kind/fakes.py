@@ -11,7 +11,10 @@ tests/kind/manifests.py mounts this file and tests/support from a ConfigMap.
   sandbox put the key in: the sandbox only has a placeholder. A request for pull
   request #99 waits SLOW_SECONDS first, for the test of a stopped run.
 - github: the fake GitHub for pull request 7, and a second one for pull request
-  99. It answers 401 unless the header holds the test token.
+  99. It answers 401 unless the header holds the test token. The calls of the
+  GitHub App (support/fake_github_app.py), from the providers command of the
+  setup Job, go to the fake App and are left out of /_test/requests, which
+  shows the calls of the reviewer only.
 - collector: keeps each OTLP body.
 """
 
@@ -20,7 +23,7 @@ import sys
 import time
 
 import support  # noqa: F401  (the import path)
-from support import Server, fake_github, mock_model
+from support import Server, fake_github, fake_github_app, mock_model
 from support.cases import REVIEW_TEXT
 
 SLOW_NUMBER = 99
@@ -59,8 +62,11 @@ def github_app():
     slow = fake_github.FakeGitHub()
     slow.pull["number"] = SLOW_NUMBER
     seven = f"/{fake_github.NUMBER}"
+    github_app_fake = fake_github_app.FakeGitHubApp()
 
     def app(handler, method, path, raw):
+        if fake_github_app.is_app_path(path):
+            return github_app_fake.app(handler, method, path, raw)
         for kind in ("pulls", "issues"):
             prefix = f"/repos/{fake_github.REPO}/{kind}/{SLOW_NUMBER}"
             if path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "?"):
@@ -105,7 +111,11 @@ def main() -> int:
 
     def app(handler, method, path, raw):
         if path == "/_test/requests":
-            seen = [r for r in handler.server.requests if not r["path"].startswith("/_test/")]
+            seen = [
+                r
+                for r in handler.server.requests
+                if not r["path"].startswith("/_test/") and not fake_github_app.is_app_path(r["path"])
+            ]
             return 200, [summary(r, secret) for r in seen], None
         return inner(handler, method, path, raw)
 

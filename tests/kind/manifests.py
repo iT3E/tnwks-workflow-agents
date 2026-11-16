@@ -10,7 +10,8 @@ Usage:
   each in the image under test (tests/kind/fakes.py). The model gateway and the
   collector have the service names of the platform, so that the examples work
   as they are: litellm-app in `ai`, alloy in `monitoring`.
-- setup: the Job that imports the provider profiles and makes the providers.
+- setup: the Job that imports the provider profiles and makes the providers,
+  with the providers command of the image (tests/kind/setup.sh).
 - receiver: the run receiver as tnwks-ops runs it, with its Role (with the
   list of Sandbox records), the service account of the run jobs (no token),
   the service account of the sweep with its Role, the token, the list of
@@ -27,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "tests"))
 
-from support import fake_github, mock_model  # noqa: E402
+from support import fake_github, fake_github_app, mock_model  # noqa: E402
 
 CLUSTER = "tnwks-image-test"
 WORKFLOWS_NS = "agents-workflows"
@@ -117,7 +118,7 @@ def service(name: str, ns: str, port: int) -> dict:
 def fakes(image: str) -> list:
     support = REPO / "tests" / "support"
     files = {"fakes.py": (HERE / "fakes.py").read_text()}
-    for name in ("__init__.py", "mock_model.py", "fake_github.py", "cases.py"):
+    for name in ("__init__.py", "mock_model.py", "fake_github.py", "fake_github_app.py", "cases.py"):
         files[f"support__{name}"] = (support / name).read_text()
     items = [{"key": k, "path": k.replace("support__", "support/")} for k in files]
     out = [namespace(ns) for ns in sorted({f[0] for f in FAKES})]
@@ -146,9 +147,15 @@ def setup(image: str) -> list:
     for p in sorted(providers.glob("*.yaml")):
         files[p.name] = p.read_text()
     env = {
-        "GATEWAY_URL": GATEWAY_URL,
-        "MODEL_KEY": mock_model.KEY,
-        "GITHUB_KEY": fake_github.TOKEN,
+        "OPENSHELL_GATEWAY_URL": GATEWAY_URL,
+        "OPENSHELL_MTLS_DIR": MTLS_MOUNT["mountPath"],
+        "PROVIDER_PROFILES_DIR": "/tmp/profiles",
+        "MODEL_GATEWAY_KEY": mock_model.KEY,
+        "GITHUB_APP_ID": fake_github_app.APP_ID,
+        "GITHUB_APP_KEY_FILE": "/tmp/app.pem",
+        "GITHUB_REPOSITORY": fake_github.REPO,
+        "GITHUB_APP_PERMISSIONS": "contents:read,pull_requests:write,checks:read",
+        "GITHUB_API_URL": GITHUB_URL,
         "FAKE_GITHUB_HOST": GITHUB_HOST,
         "FAKE_GITHUB_PORT": str(GITHUB_PORT),
         "HOME": "/tmp",
