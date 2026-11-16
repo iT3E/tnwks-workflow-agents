@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.0 - 2026-11-16
+
+### Added
+
+* The `providers` command: it imports the provider profiles into the sandbox gateway, updates the model gateway provider, gets an installation token of the GitHub App of the reviewer (with the drift check), and updates the GitHub provider. It does what the providers script of the CronJob workflow-providers did, with the same log lines and exit codes, so that the tests and the kind cluster of CI cover it.
+
 ## v0.2.0 - 2026-11-15
 
 ### Changed
