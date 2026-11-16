@@ -323,10 +323,10 @@ advice; the owner decides. The verdicts (`src/agents/renovate_reviewer/prompt.py
 | `needs-changes` | The update needs a change in the repository before it works |
 | `one-way` | A step has no revert; the owner must approve it |
 | `blocked` | Something outside the pull request must come first. Also when the review asks a person to run a check before the merge that no CI ran: the Checks section names it, with the file of the repository or the release note that asks for it. An image built by its upstream release needs no build here, and a check skipped by its paths filter is not a missing check |
+| `unclear` | The review has no verdict line that the code can read |
 
 When more than one verdict applies, the review gives the first in this order:
 `blocked`, `needs-changes`, `one-way`, `ready`.
-| `unclear` | The review has no verdict line that the code can read |
 
 The model is the Strands Anthropic model, on the Anthropic Messages API of
 the model gateway. Each call sends the effort (`output_config.effort`), and
