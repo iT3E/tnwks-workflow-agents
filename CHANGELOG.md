@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.3 - 2026-11-16
+
+### Fixed
+
+* The Renovate reviewer does not say `ready` when its own text asks a person to run a check before the merge that no CI ran: the verdict is then `blocked`, and the Checks section names the check with the file of the repository or the release note that asks for it. A check is needed only when the docs of the repository or the release notes ask for it; an image built by its upstream release needs no build, and a check skipped by its paths filter is not missing. When two verdicts apply, the order is `blocked`, `needs-changes`, `one-way`, `ready`. The README lists what each verdict means.
+
 ## v0.3.2 - 2026-11-16
 
 ### Fixed
