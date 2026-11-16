@@ -1,3 +1,0 @@
-kind: Fixed
-body: 'The `providers` command ends each unexpected error with the line `workflow-providers result=failed step=<step> name=<name>` of the step that was running, and exit 1, in place of a traceback. An answer of 200 from the code host that is not a JSON object fails the step `github-token`, and a profile file that is not UTF-8 fails the step `profile-import`. The log names only the type of the error, never its text or the text of an answer.'
-time: 2026-11-16T12:00:00.000000+00:00
