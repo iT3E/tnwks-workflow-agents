@@ -13,7 +13,7 @@ ARG PYTHON_IMAGE=python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d
 # cluster of CI (tests/kind/up.sh) installs the chart of this release with this
 # sandbox runtime, and checks that OPENSHELL_VERSION below is the same release.
 # Renovate moves the tag and the digest; the CLI and its checksums follow by hand.
-FROM ghcr.io/nvidia/openshell/sandbox:0.1.7@sha256:89819c03f291d9b909c3fc2962360e24af4516627422d18f3e681829f003f347 AS openshell-release
+FROM ghcr.io/nvidia/openshell/sandbox:0.1.9@sha256:e57d07cd6cc1fc314b80368d6b51ec6fbf825fb62cd8f081312941180846866f AS openshell-release
 
 # ---- the OpenShell CLI, for the run job and the sweep ----
 FROM ${PYTHON_IMAGE} AS openshell
@@ -22,7 +22,7 @@ ARG TARGETARCH
 # tnwks-ops. A new version needs the two checksums of its release
 # (openshell-checksums-sha256.txt): the build fails until they match.
 # renovate: datasource=github-releases depName=NVIDIA/OpenShell
-ARG OPENSHELL_VERSION=v0.1.7
+ARG OPENSHELL_VERSION=v0.1.9
 ARG OPENSHELL_SHA256_AMD64=5c1adfcae797eac9b2e8b9280c66c1f75e4e84d9e31ce6938c5b994314ef6098
 ARG OPENSHELL_SHA256_ARM64=696b523c263895b69eaa7c7e6afbb19b8af6c65cd79c7ffac7b685b6e3aa23da
 RUN set -eu; \
