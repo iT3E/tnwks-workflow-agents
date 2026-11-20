@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 
 # One image for each part of the run path of a workflow agent: the container
 # contract of each agent, the run receiver, the run job and the sweep. One
