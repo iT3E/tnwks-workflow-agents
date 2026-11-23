@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.6 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: fix(python): update charset-normalizer to 3.5.3 (#33)
+
 ## v0.3.5 - 2026-11-23
 
 ### Fixed
