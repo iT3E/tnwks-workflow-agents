@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.5 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: fix(python): update boto to 1.44.9 (#32)
+
 ## v0.3.4 - 2026-11-23
 
 ### Fixed
