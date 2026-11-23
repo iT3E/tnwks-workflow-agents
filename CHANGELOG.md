@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.4 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: fix(python): update annotated-doc to 0.0.7 (#31)
+
 ## v0.3.3 - 2026-11-16
 
 ### Fixed
