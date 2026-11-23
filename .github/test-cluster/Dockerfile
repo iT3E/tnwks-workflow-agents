@@ -11,4 +11,4 @@ FROM kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc
 
 # The controller of Agent Sandbox. The test applies the release manifest of
 # this version, with the image pinned to this digest.
-FROM registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.11@sha256:73cb162407cddf73f4cd063b02bdee2dac86aa342bbc40bd99a9f023e69b31ed AS agent-sandbox-controller
+FROM registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.12@sha256:b0ee91a42129919179baf5f429979fee3ab1a3dac6855110b4648a6ff4b44103 AS agent-sandbox-controller
