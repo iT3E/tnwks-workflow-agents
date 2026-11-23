@@ -38,6 +38,6 @@ repos:
   # Formatter. CI runs ruff only where the repo turned it on (build.yaml).
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # renovate: datasource=github-tags depName=astral-sh/ruff-pre-commit
-    rev: v0.17.5
+    rev: v0.17.6
     hooks:
       - id: ruff-format
