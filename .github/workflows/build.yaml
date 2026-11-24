@@ -30,7 +30,7 @@ jobs:
     name: python
     permissions:
       contents: read
-    uses: iT3E/github-workflows/.github/workflows/python.yaml@4628c925b741e980e4dfab955ec7e7db5dc14ef1 # v1.10.0
+    uses: iT3E/github-workflows/.github/workflows/python.yaml@502c93b19268931ef54c9297068da839aa2cbc73 # v1.10.1
     with:
       python-version: "3.13"
 
@@ -40,7 +40,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: iT3E/github-workflows/.github/workflows/image.yaml@4628c925b741e980e4dfab955ec7e7db5dc14ef1 # v1.10.0
+    uses: iT3E/github-workflows/.github/workflows/image.yaml@502c93b19268931ef54c9297068da839aa2cbc73 # v1.10.1
     with:
       push-main: false
       privacy-gate: history
